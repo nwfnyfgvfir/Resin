@@ -95,6 +95,8 @@ func NewServerWithAddress(
 		// Subscriptions.
 		authed.Handle("GET /api/v1/subscriptions", HandleListSubscriptions(cp))
 		authed.Handle("POST /api/v1/subscriptions", HandleCreateSubscription(cp))
+		authed.Handle("GET /api/v1/subscriptions:export", HandleExportSubscriptions(cp))
+		authed.Handle("POST /api/v1/subscriptions:import", HandleImportSubscriptions(cp))
 		authed.Handle("GET /api/v1/subscriptions/{id}", HandleGetSubscription(cp))
 		authed.Handle("PATCH /api/v1/subscriptions/{id}", HandleUpdateSubscription(cp))
 		authed.Handle("DELETE /api/v1/subscriptions/{id}", HandleDeleteSubscription(cp))

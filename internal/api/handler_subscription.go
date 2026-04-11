@@ -78,6 +78,36 @@ func HandleListSubscriptions(cp *service.ControlPlaneService) http.HandlerFunc {
 	}
 }
 
+// HandleExportSubscriptions returns a handler for GET /api/v1/subscriptions:export.
+func HandleExportSubscriptions(cp *service.ControlPlaneService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		doc, err := cp.ExportSubscriptions()
+		if err != nil {
+			writeServiceError(w, err)
+			return
+		}
+		w.Header().Set("Content-Disposition", "attachment; filename=\"resin-subscriptions-backup.json\"")
+		WriteJSON(w, http.StatusOK, doc)
+	}
+}
+
+// HandleImportSubscriptions returns a handler for POST /api/v1/subscriptions:import.
+func HandleImportSubscriptions(cp *service.ControlPlaneService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req service.SubscriptionBackupFile
+		if err := DecodeBody(r, &req); err != nil {
+			writeDecodeBodyError(w, err)
+			return
+		}
+		doc, err := cp.ImportSubscriptions(req)
+		if err != nil {
+			writeServiceError(w, err)
+			return
+		}
+		WriteJSON(w, http.StatusOK, doc)
+	}
+}
+
 // HandleGetSubscription returns a handler for GET /api/v1/subscriptions/{id}.
 func HandleGetSubscription(cp *service.ControlPlaneService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

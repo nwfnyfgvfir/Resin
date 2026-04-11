@@ -2,6 +2,7 @@ import { apiRequest } from "../../lib/api-client";
 import type {
   PageResponse,
   Subscription,
+  SubscriptionBackupFile,
   SubscriptionCreateInput,
   SubscriptionUpdateInput,
 } from "./types";
@@ -94,4 +95,15 @@ export async function cleanupSubscriptionCircuitOpenNodes(id: string): Promise<n
     method: "POST",
   });
   return data.cleaned_count;
+}
+
+export async function exportSubscriptions(): Promise<SubscriptionBackupFile> {
+  return apiRequest<SubscriptionBackupFile>(`${basePath}:export`);
+}
+
+export async function importSubscriptions(input: SubscriptionBackupFile): Promise<SubscriptionBackupFile> {
+  return apiRequest<SubscriptionBackupFile>(`${basePath}:import`, {
+    method: "POST",
+    body: input,
+  });
 }

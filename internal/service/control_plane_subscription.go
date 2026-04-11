@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -37,6 +38,23 @@ type SubscriptionResponse struct {
 	LastChecked             string `json:"last_checked,omitempty"`
 	LastUpdated             string `json:"last_updated,omitempty"`
 	LastError               string `json:"last_error,omitempty"`
+}
+
+type SubscriptionBackupItem struct {
+	Name                    string `json:"name"`
+	SourceType              string `json:"source_type"`
+	URL                     string `json:"url,omitempty"`
+	Content                 string `json:"content,omitempty"`
+	UpdateInterval          string `json:"update_interval"`
+	Enabled                 bool   `json:"enabled"`
+	Ephemeral               bool   `json:"ephemeral"`
+	EphemeralNodeEvictDelay string `json:"ephemeral_node_evict_delay"`
+}
+
+type SubscriptionBackupFile struct {
+	Version       int                      `json:"version"`
+	ExportedAt    string                   `json:"exported_at"`
+	Subscriptions []SubscriptionBackupItem `json:"subscriptions"`
 }
 
 func (s *ControlPlaneService) subToResponse(sub *subscription.Subscription) SubscriptionResponse {
@@ -112,6 +130,88 @@ func (s *ControlPlaneService) GetSubscription(id string) (*SubscriptionResponse,
 	return &r, nil
 }
 
+// ExportSubscriptions returns a portable subscription backup document.
+func (s *ControlPlaneService) ExportSubscriptions() (*SubscriptionBackupFile, error) {
+	subs, err := s.ListSubscriptions(nil)
+	if err != nil {
+		return nil, err
+	}
+	slices.SortFunc(subs, func(a, b SubscriptionResponse) int {
+		return strings.Compare(a.Name+"\x00"+a.ID, b.Name+"\x00"+b.ID)
+	})
+	items := make([]SubscriptionBackupItem, 0, len(subs))
+	for _, sub := range subs {
+		items = append(items, backupItemFromResponse(sub))
+	}
+	return &SubscriptionBackupFile{
+		Version:       subscriptionBackupVersion,
+		ExportedAt:    time.Now().UTC().Format(time.RFC3339Nano),
+		Subscriptions: items,
+	}, nil
+}
+
+// ImportSubscriptions replaces current subscriptions with those from a backup document.
+func (s *ControlPlaneService) ImportSubscriptions(doc SubscriptionBackupFile) (*SubscriptionBackupFile, error) {
+	if doc.Version != subscriptionBackupVersion {
+		return nil, invalidArg(fmt.Sprintf("version: must be %d", subscriptionBackupVersion))
+	}
+	if doc.Subscriptions == nil {
+		return nil, invalidArg("subscriptions is required")
+	}
+
+	requests := make([]CreateSubscriptionRequest, 0, len(doc.Subscriptions))
+	for i, item := range doc.Subscriptions {
+		req, verr := createSubscriptionRequestFromBackupItem(item)
+		if verr != nil {
+			return nil, invalidArg(fmt.Sprintf("subscriptions[%d]: %s", i, verr.Message))
+		}
+		requests = append(requests, req)
+	}
+
+	existing, err := s.ListSubscriptions(nil)
+	if err != nil {
+		return nil, err
+	}
+	oldIDs := make([]string, 0, len(existing))
+	for _, sub := range existing {
+		oldIDs = append(oldIDs, sub.ID)
+	}
+
+	created := make([]SubscriptionResponse, 0, len(requests))
+	for i, req := range requests {
+		createdSub, err := s.CreateSubscription(req)
+		if err != nil {
+			for j := len(created) - 1; j >= 0; j-- {
+				_ = s.DeleteSubscription(created[j].ID)
+			}
+			if svcErr, ok := err.(*ServiceError); ok {
+				return nil, &ServiceError{Code: svcErr.Code, Message: fmt.Sprintf("subscriptions[%d]: %s", i, svcErr.Message), Err: svcErr.Err}
+			}
+			return nil, err
+		}
+		created = append(created, *createdSub)
+	}
+
+	for _, id := range oldIDs {
+		if err := s.DeleteSubscription(id); err != nil {
+			return nil, err
+		}
+	}
+
+	items := make([]SubscriptionBackupItem, 0, len(created))
+	for _, sub := range created {
+		items = append(items, backupItemFromResponse(sub))
+	}
+	slices.SortFunc(items, func(a, b SubscriptionBackupItem) int {
+		return strings.Compare(a.Name+"\x00"+a.URL+"\x00"+a.Content, b.Name+"\x00"+b.URL+"\x00"+b.Content)
+	})
+	return &SubscriptionBackupFile{
+		Version:       subscriptionBackupVersion,
+		ExportedAt:    time.Now().UTC().Format(time.RFC3339Nano),
+		Subscriptions: items,
+	}, nil
+}
+
 // CreateSubscriptionRequest holds create subscription parameters.
 type CreateSubscriptionRequest struct {
 	Name                    *string `json:"name"`
@@ -126,6 +226,7 @@ type CreateSubscriptionRequest struct {
 
 const minSubscriptionUpdateInterval = 30 * time.Second
 const defaultSubscriptionEphemeralNodeEvictDelay = 72 * time.Hour
+const subscriptionBackupVersion = 1
 
 func parseSubscriptionSourceType(raw *string) (string, *ServiceError) {
 	if raw == nil {
@@ -138,6 +239,56 @@ func parseSubscriptionSourceType(raw *string) (string, *ServiceError) {
 	default:
 		return "", invalidArg("source_type: must be remote or local")
 	}
+}
+
+func backupItemFromResponse(sub SubscriptionResponse) SubscriptionBackupItem {
+	return SubscriptionBackupItem{
+		Name:                    sub.Name,
+		SourceType:              sub.SourceType,
+		URL:                     sub.URL,
+		Content:                 sub.Content,
+		UpdateInterval:          sub.UpdateInterval,
+		Enabled:                 sub.Enabled,
+		Ephemeral:               sub.Ephemeral,
+		EphemeralNodeEvictDelay: sub.EphemeralNodeEvictDelay,
+	}
+}
+
+func createSubscriptionRequestFromBackupItem(item SubscriptionBackupItem) (CreateSubscriptionRequest, *ServiceError) {
+	sourceType, verr := parseSubscriptionSourceType(&item.SourceType)
+	if verr != nil {
+		return CreateSubscriptionRequest{}, verr
+	}
+	name := strings.TrimSpace(item.Name)
+	if name == "" {
+		return CreateSubscriptionRequest{}, invalidArg("name is required")
+	}
+	updateInterval := strings.TrimSpace(item.UpdateInterval)
+	if updateInterval == "" {
+		return CreateSubscriptionRequest{}, invalidArg("update_interval is required")
+	}
+	ephemeralNodeEvictDelay := strings.TrimSpace(item.EphemeralNodeEvictDelay)
+	if ephemeralNodeEvictDelay == "" {
+		ephemeralNodeEvictDelay = defaultSubscriptionEphemeralNodeEvictDelay.String()
+	}
+
+	req := CreateSubscriptionRequest{
+		Name:                    &name,
+		SourceType:              &sourceType,
+		UpdateInterval:          &updateInterval,
+		Enabled:                 &item.Enabled,
+		Ephemeral:               &item.Ephemeral,
+		EphemeralNodeEvictDelay: &ephemeralNodeEvictDelay,
+	}
+	switch sourceType {
+	case subscription.SourceTypeRemote:
+		url := strings.TrimSpace(item.URL)
+		req.URL = &url
+	case subscription.SourceTypeLocal:
+		content := item.Content
+		req.Content = &content
+	}
+	return req, nil
 }
 
 // CreateSubscription creates a new subscription.

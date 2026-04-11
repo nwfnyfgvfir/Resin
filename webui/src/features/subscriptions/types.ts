@@ -43,3 +43,20 @@ export type SubscriptionUpdateInput = {
   ephemeral?: boolean;
   ephemeral_node_evict_delay?: string;
 };
+
+export type SubscriptionBackupItem = {
+  name: string;
+  source_type: "remote" | "local";
+  url?: string;
+  content?: string;
+  update_interval: string;
+  enabled: boolean;
+  ephemeral: boolean;
+  ephemeral_node_evict_delay: string;
+};
+
+export type SubscriptionBackupFile = {
+  version: number;
+  exported_at: string;
+  subscriptions: SubscriptionBackupItem[];
+};

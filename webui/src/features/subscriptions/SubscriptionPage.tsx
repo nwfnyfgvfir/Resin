@@ -1,8 +1,8 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createColumnHelper } from "@tanstack/react-table";
-import { AlertTriangle, Eye, Filter, Info, Pencil, Plus, RefreshCw, Search, Sparkles, Trash2, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AlertTriangle, Download, Eye, Filter, Info, Pencil, Plus, RefreshCw, Search, Sparkles, Trash2, Upload, X } from "lucide-react";
+import { type ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
 import { Link } from "react-router-dom";
 import { z } from "zod";
@@ -24,11 +24,13 @@ import {
   cleanupSubscriptionCircuitOpenNodes,
   createSubscription,
   deleteSubscription,
+  exportSubscriptions,
+  importSubscriptions,
   listSubscriptions,
   refreshSubscription,
   updateSubscription,
 } from "./api";
-import type { Subscription } from "./types";
+import type { Subscription, SubscriptionBackupFile } from "./types";
 
 type EnabledFilter = "all" | "enabled" | "disabled";
 type SubscriptionSourceType = "remote" | "local";
@@ -74,6 +76,7 @@ const PAGE_SIZE_OPTIONS = [10, 20, 50, 100] as const;
 const LOCAL_SOURCE_UPDATE_INTERVAL = "12h";
 const SUBSCRIPTION_DISABLE_HINT = "禁用订阅后，相关节点不会参与平台路由、健康统计或自动探测。";
 const SUBSCRIPTION_EPHEMERAL_HINT = "临时订阅的非健康节点会在一段时间后被自动删除。订阅本身不会被删除。";
+const SUBSCRIPTION_BACKUP_FILENAME = "resin-subscriptions-backup.json";
 
 function extractHostname(url: string): string {
   try {
@@ -117,6 +120,28 @@ function normalizeSubmitUpdateInterval(sourceType: SubscriptionSourceType, raw: 
   return raw.trim();
 }
 
+function isSubscriptionBackupFile(value: unknown): value is SubscriptionBackupFile {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const candidate = value as Partial<SubscriptionBackupFile>;
+  return typeof candidate.version === "number"
+    && typeof candidate.exported_at === "string"
+    && Array.isArray(candidate.subscriptions);
+}
+
+function downloadSubscriptionBackup(doc: SubscriptionBackupFile) {
+  const blob = new Blob([JSON.stringify(doc, null, 2)], { type: "application/json;charset=utf-8" });
+  const url = window.URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = SUBSCRIPTION_BACKUP_FILENAME;
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  window.URL.revokeObjectURL(url);
+}
+
 export function SubscriptionPage() {
   const { t } = useI18n();
   const [enabledFilter, setEnabledFilter] = useState<EnabledFilter>("all");
@@ -127,6 +152,7 @@ export function SubscriptionPage() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [pendingRefreshIds, setPendingRefreshIds] = useState<Set<string>>(() => new Set());
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const { toasts, showToast, dismissToast } = useToast();
   const pendingRefreshIdsRef = useRef<Set<string>>(new Set());
 
@@ -325,6 +351,30 @@ export function SubscriptionPage() {
   });
   const refreshSubscriptionMutateAsync = refreshMutation.mutateAsync;
 
+  const exportMutation = useMutation({
+    mutationFn: exportSubscriptions,
+    onSuccess: (doc) => {
+      downloadSubscriptionBackup(doc);
+      showToast("success", t("订阅备份已导出，共 {{count}} 条订阅", { count: doc.subscriptions.length }));
+    },
+    onError: (error) => {
+      showToast("error", formatApiErrorMessage(error, t));
+    },
+  });
+
+  const importMutation = useMutation({
+    mutationFn: importSubscriptions,
+    onSuccess: async (doc) => {
+      await invalidateSubscriptionsAndNodes();
+      setSelectedSubscriptionId("");
+      setDrawerOpen(false);
+      showToast("success", t("订阅备份已导入，共恢复 {{count}} 条订阅", { count: doc.subscriptions.length }));
+    },
+    onError: (error) => {
+      showToast("error", formatApiErrorMessage(error, t));
+    },
+  });
+
   const markRefreshPending = useCallback((subscriptionId: string): boolean => {
     if (pendingRefreshIdsRef.current.has(subscriptionId)) {
       return false;
@@ -400,6 +450,42 @@ export function SubscriptionPage() {
     }
     await cleanupCircuitOpenNodesMutation.mutateAsync(subscription);
   };
+
+  const handleExport = useCallback(async () => {
+    await exportMutation.mutateAsync();
+  }, [exportMutation]);
+
+  const handleOpenImport = useCallback(() => {
+    fileInputRef.current?.click();
+  }, []);
+
+  const handleImportFileChange = useCallback(async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) {
+      return;
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(await file.text()) as unknown;
+    } catch {
+      showToast("error", t("导入文件不是有效的 JSON"));
+      return;
+    }
+
+    if (!isSubscriptionBackupFile(parsed)) {
+      showToast("error", t("导入文件格式不正确，缺少 version / exported_at / subscriptions 字段"));
+      return;
+    }
+
+    const confirmed = window.confirm(t("确认使用备份覆盖当前全部订阅？此操作会替换现有订阅。"));
+    if (!confirmed) {
+      return;
+    }
+
+    await importMutation.mutateAsync(parsed);
+  }, [importMutation, showToast, t]);
 
   const openDrawer = useCallback((subscription: Subscription) => {
     setSelectedSubscriptionId(subscription.id);
@@ -579,6 +665,15 @@ export function SubscriptionPage() {
                 style={{ padding: "6px 10px", borderRadius: 8 }}
               />
             </label>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="application/json,.json"
+              style={{ display: "none" }}
+              onChange={(event) => {
+                void handleImportFileChange(event);
+              }}
+            />
             <Button
               variant="secondary"
               size="sm"
@@ -586,6 +681,24 @@ export function SubscriptionPage() {
             >
               <Plus size={16} />
               {t("新建")}
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => void handleExport()}
+              disabled={exportMutation.isPending}
+            >
+              <Download size={16} />
+              {exportMutation.isPending ? t("导出中...") : t("导出")}
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={handleOpenImport}
+              disabled={importMutation.isPending}
+            >
+              <Upload size={16} />
+              {importMutation.isPending ? t("导入中...") : t("导入")}
             </Button>
             <Button
               variant="secondary"
