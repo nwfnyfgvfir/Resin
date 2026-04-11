@@ -1085,6 +1085,9 @@ func TestAPIContract_SystemEnvConfigSnapshot(t *testing.T) {
 		t.Fatalf("env config status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 	body := decodeJSONMap(t, rec)
+	if body["persistence_dialect"] != "" {
+		t.Fatalf("persistence_dialect: got %v, want empty string", body["persistence_dialect"])
+	}
 	if body["default_platform_sticky_ttl"] != cp.EnvCfg.DefaultPlatformStickyTTL.String() {
 		t.Fatalf(
 			"default_platform_sticky_ttl: got %v, want %s",

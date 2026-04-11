@@ -302,6 +302,9 @@ func TestSystemEnvConfig_OK(t *testing.T) {
 	if body["cache_dir"] != "/tmp/resin/cache" {
 		t.Errorf("cache_dir: got %q, want %q", body["cache_dir"], "/tmp/resin/cache")
 	}
+	if body["persistence_dialect"] != "" {
+		t.Errorf("persistence_dialect: got %q, want %q", body["persistence_dialect"], "")
+	}
 	if body["listen_address"] != "127.0.0.1" {
 		t.Errorf("listen_address: got %q, want %q", body["listen_address"], "127.0.0.1")
 	}

@@ -125,6 +125,7 @@ const EXACT_ZH_TO_EN: Record<string, string> = {
   "输入 IP 执行查询": "Enter an IP address to query",
   "GeoIP 数据库更新任务已执行": "GeoIP database update task has been triggered",
   "数据库状态": "Database Status",
+  "数据库类型": "Database Type",
   "数据库更新时间": "Database Updated At",
   "数据库已加载": "Database loaded",
   "数据库未加载": "Database not loaded",

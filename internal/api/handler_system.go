@@ -12,6 +12,7 @@ type systemEnvConfigResponse struct {
 	CacheDir                                        string          `json:"cache_dir"`
 	StateDir                                        string          `json:"state_dir"`
 	LogDir                                          string          `json:"log_dir"`
+	PersistenceDialect                              string          `json:"persistence_dialect"`
 	ListenAddress                                   string          `json:"listen_address"`
 	ResinPort                                       int             `json:"resin_port"`
 	APIMaxBodyBytes                                 int             `json:"api_max_body_bytes"`
@@ -108,6 +109,7 @@ func systemEnvConfigSnapshot(envCfg *config.EnvConfig) *systemEnvConfigResponse 
 		CacheDir:                              envCfg.CacheDir,
 		StateDir:                              envCfg.StateDir,
 		LogDir:                                envCfg.LogDir,
+		PersistenceDialect:                    envCfg.PersistenceDialect,
 		ListenAddress:                         envCfg.ListenAddress,
 		ResinPort:                             envCfg.ResinPort,
 		APIMaxBodyBytes:                       envCfg.APIMaxBodyBytes,

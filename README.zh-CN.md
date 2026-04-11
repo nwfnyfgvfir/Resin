@@ -95,6 +95,26 @@ services:
 ```
 运行 `docker compose up -d` 启动服务。
 
+默认情况下，Resin 使用本地 SQLite 文件持久化。若要将核心 `state/cache` 持久化切换到 PostgreSQL，请设置：
+
+```bash
+RESIN_PERSISTENCE_DIALECT=postgres
+RESIN_DATABASE_URL=postgres://user:pass@host:5432/resin?sslmode=disable
+```
+
+可选连接池参数：
+
+```bash
+RESIN_DATABASE_MAX_OPEN_CONNS=10
+RESIN_DATABASE_MAX_IDLE_CONNS=5
+```
+
+当前 PostgreSQL 持久化范围：
+- 已迁移：核心 `state` + `cache`
+- 尚未迁移：`metrics.db` 与滚动分片 `request_logs-*.db`
+
+管理面板会显示当前数据库类型，便于确认进程实际运行在 SQLite 还是 PostgreSQL 模式。
+
 *(如果你不想使用 Docker，请跳转文末查看 [其他部署方式](#其他部署方式))*
 
 ### 第二步：导入代理节点

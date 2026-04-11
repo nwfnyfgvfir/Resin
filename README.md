@@ -1,5 +1,5 @@
 [English](README.md) | [简体中文](README.zh-CN.md)
-sqlx
+
 <div align="center">
   <img src="webui/public/vite.svg" width="48" alt="Resin Logo" />
   <h1>Resin</h1>
@@ -95,6 +95,26 @@ services:
 ```
 
 Run `docker compose up -d` to start the service.
+
+By default, Resin uses local SQLite files for persistence. To switch core state/cache persistence to PostgreSQL, set:
+
+```bash
+RESIN_PERSISTENCE_DIALECT=postgres
+RESIN_DATABASE_URL=postgres://user:pass@host:5432/resin?sslmode=disable
+```
+
+Optional connection-pool settings:
+
+```bash
+RESIN_DATABASE_MAX_OPEN_CONNS=10
+RESIN_DATABASE_MAX_IDLE_CONNS=5
+```
+
+Current scope of PostgreSQL persistence:
+- migrated: core `state` + `cache`
+- not yet migrated: `metrics.db` and rolling `request_logs-*.db`
+
+The admin panel now shows the active database type so you can verify whether the process is running with SQLite or PostgreSQL.
 
 *(If you don't want Docker, jump to [Other Deployment Options](#other-deployment-options).)*
 

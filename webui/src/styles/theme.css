@@ -165,6 +165,15 @@ a {
   text-overflow: ellipsis;
 }
 
+.brand-meta {
+  margin-top: 4px;
+  font-size: 11px;
+  color: rgba(100, 112, 134, 0.9);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .sidebar-main {
   flex: 1 1 auto;
   min-height: 0;

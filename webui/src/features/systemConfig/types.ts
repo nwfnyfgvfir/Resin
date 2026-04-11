@@ -21,6 +21,7 @@ export type EnvConfig = {
   cache_dir: string;
   state_dir: string;
   log_dir: string;
+  persistence_dialect: string;
   listen_address: string;
   resin_port: number;
   api_max_body_bytes: number;

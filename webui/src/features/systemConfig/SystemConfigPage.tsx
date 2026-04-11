@@ -88,6 +88,11 @@ const EMPTY_ACCOUNT_BEHAVIOR_LABELS: Record<string, string> = {
   ACCOUNT_HEADER_RULE: "按照全局请求头规则提取 Account",
 };
 
+const PERSISTENCE_DIALECT_LABELS: Record<string, string> = {
+  sqlite: "SQLite",
+  postgres: "PostgreSQL",
+};
+
 function configToForm(config: RuntimeConfig): RuntimeConfigForm {
   return {
     request_log_enabled: config.request_log_enabled,
@@ -140,6 +145,11 @@ function parseAuthorities(raw: string): string[] {
     .filter(Boolean);
 
   return Array.from(new Set(items));
+}
+
+function displayPersistenceDialect(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  return PERSISTENCE_DIALECT_LABELS[normalized] ?? (normalized || "SQLite");
 }
 
 function parseForm(form: RuntimeConfigForm): RuntimeConfig {
@@ -747,6 +757,10 @@ export function SystemConfigPage() {
                     <div className="field-group">
                       <label className="field-label" style={{ margin: 0 }}>{t("日志保留目录")}</label>
                       <Input readOnly disabled value={envBaseline.log_dir} />
+                    </div>
+                    <div className="field-group">
+                      <label className="field-label" style={{ margin: 0 }}>{t("数据库类型")}</label>
+                      <Input readOnly disabled value={displayPersistenceDialect(envBaseline.persistence_dialect)} />
                     </div>
                     <div className="field-group">
                       <label className="field-label" style={{ margin: 0 }}>{t("统一监听地址")}</label>
