@@ -1,33 +1,41 @@
 package proxy
 
 import (
+	"bufio"
 	"context"
 	"encoding/base64"
+	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/Resinat/Resin/internal/config"
 	"github.com/Resinat/Resin/internal/model"
 	"github.com/Resinat/Resin/internal/node"
 	"github.com/Resinat/Resin/internal/platform"
 	"github.com/Resinat/Resin/internal/routing"
 	"github.com/sagernet/sing-box/adapter"
 	M "github.com/sagernet/sing/common/metadata"
+	"github.com/sagernet/sing/common/varbin"
+	"github.com/sagernet/sing/protocol/socks/socks5"
 )
 
 // --- Mock infrastructure ---
 
 type mockPool struct {
-	entry *node.NodeEntry
+	entry         *node.NodeEntry
+	platforms     map[string]*platform.Platform
+	platformNames map[string]*platform.Platform
 }
 
 func (m *mockPool) GetEntry(hash node.Hash) (*node.NodeEntry, bool) {
-	if m.entry == nil {
+	if m.entry == nil || m.entry.Hash != hash {
 		return nil, false
 	}
 	return m.entry, true
@@ -36,11 +44,30 @@ func (m *mockPool) GetEntry(hash node.Hash) (*node.NodeEntry, bool) {
 func (m *mockPool) RangeNodes(fn func(node.Hash, *node.NodeEntry) bool) {}
 
 func (m *mockPool) GetPlatform(id string) (*platform.Platform, bool) {
-	return nil, false
+	if m.platforms == nil {
+		return nil, false
+	}
+	p, ok := m.platforms[id]
+	return p, ok
 }
 
 func (m *mockPool) GetPlatformByName(name string) (*platform.Platform, bool) {
-	return nil, false
+	if m.platformNames == nil {
+		return nil, false
+	}
+	p, ok := m.platformNames[name]
+	return p, ok
+}
+
+func (m *mockPool) RangePlatforms(fn func(*platform.Platform) bool) {
+	if m.platforms == nil {
+		return
+	}
+	for _, p := range m.platforms {
+		if !fn(p) {
+			return
+		}
+	}
 }
 
 type mockHealthRecorder struct {
@@ -85,7 +112,8 @@ func (m *mockEventEmitter) EmitRequestLog(e RequestLogEntry) {
 // mockOutbound implements adapter.Outbound to provide DialContext.
 type mockOutbound struct {
 	adapter.Outbound
-	dialFunc func(ctx context.Context, network string, dest M.Socksaddr) (net.Conn, error)
+	dialFunc         func(ctx context.Context, network string, dest M.Socksaddr) (net.Conn, error)
+	listenPacketFunc func(ctx context.Context, dest M.Socksaddr) (net.PacketConn, error)
 }
 
 func (m *mockOutbound) DialContext(ctx context.Context, network string, dest M.Socksaddr) (net.Conn, error) {
@@ -93,6 +121,13 @@ func (m *mockOutbound) DialContext(ctx context.Context, network string, dest M.S
 		return m.dialFunc(ctx, network, dest)
 	}
 	return nil, &net.OpError{Op: "dial", Net: network, Err: &net.DNSError{Err: "mock: no dial func"}}
+}
+
+func (m *mockOutbound) ListenPacket(ctx context.Context, dest M.Socksaddr) (net.PacketConn, error) {
+	if m.listenPacketFunc != nil {
+		return m.listenPacketFunc(ctx, dest)
+	}
+	return nil, &net.OpError{Op: "listen", Net: "udp", Err: &net.DNSError{Err: "mock: no listen packet func"}}
 }
 
 func (m *mockOutbound) Tag() string  { return "mock" }
@@ -104,7 +139,254 @@ func basicAuth(user, pass string) string {
 	return "Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+pass))
 }
 
+func mustReadSocks5AuthResponse(t *testing.T, conn net.Conn) socks5.AuthResponse {
+	t.Helper()
+	resp, err := socks5.ReadAuthResponse(varbin.StubReader(bufio.NewReader(conn)))
+	if err != nil {
+		t.Fatalf("ReadAuthResponse: %v", err)
+	}
+	return resp
+}
+
+func mustReadSocks5UsernamePasswordAuthResponse(t *testing.T, conn net.Conn) socks5.UsernamePasswordAuthResponse {
+	t.Helper()
+	resp, err := socks5.ReadUsernamePasswordAuthResponse(varbin.StubReader(bufio.NewReader(conn)))
+	if err != nil {
+		t.Fatalf("ReadUsernamePasswordAuthResponse: %v", err)
+	}
+	return resp
+}
+
+func mustReadSocks5Response(t *testing.T, conn net.Conn) socks5.Response {
+	t.Helper()
+	resp, err := socks5.ReadResponse(varbin.StubReader(bufio.NewReader(conn)))
+	if err != nil {
+		t.Fatalf("ReadResponse: %v", err)
+	}
+	return resp
+}
+
+func buildSocks5ProxyForTest(t *testing.T, profile config.DeploymentProfile, token string, authVersion config.AuthVersion, ob adapter.Outbound) (*Socks5Proxy, *mockEventEmitter, *mockHealthRecorder) {
+	t.Helper()
+	entry := node.NewNodeEntry(node.Hash{1}, nil, time.Now(), 0)
+	entry.SetEgressIP(netip.MustParseAddr("203.0.113.9"))
+	if ob != nil {
+		entry.Outbound.Store(&ob)
+	}
+	defaultPlatform := platform.NewPlatform(platform.DefaultPlatformID, platform.DefaultPlatformName, nil, nil)
+	pool := &mockPool{
+		entry: entry,
+		platforms: map[string]*platform.Platform{
+			platform.DefaultPlatformID: defaultPlatform,
+		},
+		platformNames: map[string]*platform.Platform{
+			platform.DefaultPlatformName: defaultPlatform,
+		},
+	}
+	router := routing.NewRouter(routing.RouterConfig{Pool: pool})
+	emitter := newMockEventEmitter()
+	health := &mockHealthRecorder{}
+	return NewSocks5Proxy(Socks5ProxyConfig{
+		ProxyToken:        token,
+		AuthVersion:       string(authVersion),
+		DeploymentProfile: profile,
+		AdvertiseHost:     "socks.resin.test",
+		ListenAddress:     "127.0.0.1",
+		ListenPort:        1080,
+		Router:            router,
+		Pool:              pool,
+		Health:            health,
+		Events:            emitter,
+	}), emitter, health
+}
+
 // --- Tests ---
+
+func TestSocks5Proxy_Handshake_AuthDisabledPrefersUsernamePasswordIdentity(t *testing.T) {
+	proxy, _, _ := buildSocks5ProxyForTest(t, config.DeploymentProfileStandard, "", config.AuthVersionV1, nil)
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+
+	resultCh := make(chan socks5AuthResult, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		reader := bufio.NewReader(serverConn)
+		result, err := proxy.handshake(serverConn, reader)
+		resultCh <- result
+		errCh <- err
+		_ = serverConn.Close()
+	}()
+
+	if err := socks5.WriteAuthRequest(clientConn, socks5.AuthRequest{Methods: []byte{socks5.AuthTypeNotRequired, socks5.AuthTypeUsernamePassword}}); err != nil {
+		t.Fatalf("WriteAuthRequest: %v", err)
+	}
+	authResp := mustReadSocks5AuthResponse(t, clientConn)
+	if authResp.Method != socks5.AuthTypeUsernamePassword {
+		t.Fatalf("auth method: got %d, want %d", authResp.Method, socks5.AuthTypeUsernamePassword)
+	}
+	if err := socks5.WriteUsernamePasswordAuthRequest(clientConn, socks5.UsernamePasswordAuthRequest{Username: "my-platform.account-a:any-token", Password: ""}); err != nil {
+		t.Fatalf("WriteUsernamePasswordAuthRequest: %v", err)
+	}
+	credResp := mustReadSocks5UsernamePasswordAuthResponse(t, clientConn)
+	if credResp.Status != socks5.UsernamePasswordStatusSuccess {
+		t.Fatalf("auth status: got %d, want %d", credResp.Status, socks5.UsernamePasswordStatusSuccess)
+	}
+
+	result := <-resultCh
+	if err := <-errCh; err != nil {
+		t.Fatalf("handshake error: %v", err)
+	}
+	if result.platformName != "my-platform" || result.account != "account-a" {
+		t.Fatalf("got platform=%q account=%q, want platform=%q account=%q", result.platformName, result.account, "my-platform", "account-a")
+	}
+}
+
+func TestSocks5Proxy_Handshake_AuthDisabledFallsBackToNoAuth(t *testing.T) {
+	proxy, _, _ := buildSocks5ProxyForTest(t, config.DeploymentProfileStandard, "", config.AuthVersionLegacyV0, nil)
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+
+	resultCh := make(chan socks5AuthResult, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		reader := bufio.NewReader(serverConn)
+		result, err := proxy.handshake(serverConn, reader)
+		resultCh <- result
+		errCh <- err
+		_ = serverConn.Close()
+	}()
+
+	if err := socks5.WriteAuthRequest(clientConn, socks5.AuthRequest{Methods: []byte{socks5.AuthTypeNotRequired}}); err != nil {
+		t.Fatalf("WriteAuthRequest: %v", err)
+	}
+	authResp := mustReadSocks5AuthResponse(t, clientConn)
+	if authResp.Method != socks5.AuthTypeNotRequired {
+		t.Fatalf("auth method: got %d, want %d", authResp.Method, socks5.AuthTypeNotRequired)
+	}
+
+	result := <-resultCh
+	if err := <-errCh; err != nil {
+		t.Fatalf("handshake error: %v", err)
+	}
+	if result.platformName != "" || result.account != "" {
+		t.Fatalf("expected empty identity, got platform=%q account=%q", result.platformName, result.account)
+	}
+}
+
+func TestSocks5Proxy_Handshake_AuthFailure(t *testing.T) {
+	proxy, _, _ := buildSocks5ProxyForTest(t, config.DeploymentProfileStandard, "correct-token", config.AuthVersionLegacyV0, nil)
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+
+	errCh := make(chan error, 1)
+	go func() {
+		reader := bufio.NewReader(serverConn)
+		_, err := proxy.handshake(serverConn, reader)
+		errCh <- err
+		_ = serverConn.Close()
+	}()
+
+	if err := socks5.WriteAuthRequest(clientConn, socks5.AuthRequest{Methods: []byte{socks5.AuthTypeUsernamePassword}}); err != nil {
+		t.Fatalf("WriteAuthRequest: %v", err)
+	}
+	authResp := mustReadSocks5AuthResponse(t, clientConn)
+	if authResp.Method != socks5.AuthTypeUsernamePassword {
+		t.Fatalf("auth method: got %d, want %d", authResp.Method, socks5.AuthTypeUsernamePassword)
+	}
+	if err := socks5.WriteUsernamePasswordAuthRequest(clientConn, socks5.UsernamePasswordAuthRequest{Username: "plat:acct", Password: "wrong-token"}); err != nil {
+		t.Fatalf("WriteUsernamePasswordAuthRequest: %v", err)
+	}
+	credResp := mustReadSocks5UsernamePasswordAuthResponse(t, clientConn)
+	if credResp.Status != socks5.UsernamePasswordStatusFailure {
+		t.Fatalf("auth status: got %d, want %d", credResp.Status, socks5.UsernamePasswordStatusFailure)
+	}
+	if err := <-errCh; err == nil {
+		t.Fatal("expected authentication error")
+	}
+}
+
+func TestSocks5Proxy_HandleUDPAssociate_ProfileDenied(t *testing.T) {
+	ob := &mockOutbound{}
+	proxy, emitter, health := buildSocks5ProxyForTest(t, config.DeploymentProfileKoyebTCP, "", config.AuthVersionLegacyV0, ob)
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+
+	done := make(chan struct{})
+	go func() {
+		proxy.handleUDPAssociateConn(serverConn, socks5.Request{Command: socks5.CommandUDPAssociate}, socks5AuthResult{platformName: "", account: "acct-udp"})
+		close(done)
+		_ = serverConn.Close()
+	}()
+
+	resp := mustReadSocks5Response(t, clientConn)
+	if resp.ReplyCode != socks5.ReplyCodeNotAllowed {
+		t.Fatalf("reply code: got %d, want %d", resp.ReplyCode, socks5.ReplyCodeNotAllowed)
+	}
+	<-done
+
+	if health.resultCalls.Load() != 0 {
+		t.Fatalf("health result calls: got %d, want 0", health.resultCalls.Load())
+	}
+	select {
+	case ev := <-emitter.finishedCh:
+		if ev.ProxyType != ProxyTypeSocks5 {
+			t.Fatalf("proxy type: got %v, want %v", ev.ProxyType, ProxyTypeSocks5)
+		}
+		if ev.NetOK {
+			t.Fatal("expected NetOK=false for denied UDP associate")
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("expected finished event")
+	}
+	select {
+	case logEv := <-emitter.logCh:
+		if logEv.HTTPMethod != "SOCKS_UDP_ASSOCIATE" {
+			t.Fatalf("HTTPMethod: got %q, want %q", logEv.HTTPMethod, "SOCKS_UDP_ASSOCIATE")
+		}
+		if logEv.ResinError != ErrUpstreamRequestFailed.ResinError {
+			t.Fatalf("ResinError: got %q, want %q", logEv.ResinError, ErrUpstreamRequestFailed.ResinError)
+		}
+		if logEv.Account != "acct-udp" {
+			t.Fatalf("Account: got %q, want %q", logEv.Account, "acct-udp")
+		}
+		if logEv.ProxyType != ProxyTypeSocks5 {
+			t.Fatalf("ProxyType: got %v, want %v", logEv.ProxyType, ProxyTypeSocks5)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("expected request log event")
+	}
+}
+
+func TestSocksReplyCodeForProxyError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  *ProxyError
+		want byte
+	}{
+		{name: "auth required", err: ErrAuthRequired, want: socks5.ReplyCodeNotAllowed},
+		{name: "auth failed", err: ErrAuthFailed, want: socks5.ReplyCodeNotAllowed},
+		{name: "platform not found", err: ErrPlatformNotFound, want: socks5.ReplyCodeHostUnreachable},
+		{name: "timeout", err: ErrUpstreamTimeout, want: socks5.ReplyCodeTTLExpired},
+		{name: "connect failed", err: ErrUpstreamConnectFailed, want: socks5.ReplyCodeHostUnreachable},
+		{name: "request failed", err: ErrUpstreamRequestFailed, want: socks5.ReplyCodeFailure},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := socksReplyCodeForProxyError(tt.err); got != tt.want {
+				t.Fatalf("socksReplyCodeForProxyError(%v): got %d, want %d", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSocksReplyCodeForError(t *testing.T) {
+	if got := socksReplyCodeForError(syscall.ECONNREFUSED, ErrUpstreamRequestFailed); got != socks5.ReplyCodeConnectionRefused {
+		t.Fatalf("ECONNREFUSED reply code: got %d, want %d", got, socks5.ReplyCodeConnectionRefused)
+	}
+	if got := socksReplyCodeForError(errors.New("generic"), ErrUpstreamTimeout); got != socks5.ReplyCodeTTLExpired {
+		t.Fatalf("fallback reply code: got %d, want %d", got, socks5.ReplyCodeTTLExpired)
+	}
+}
 
 func TestForwardProxy_AuthRequired(t *testing.T) {
 	fp := &ForwardProxy{token: "tok", events: NoOpEventEmitter{}}

@@ -14,7 +14,10 @@ type systemEnvConfigResponse struct {
 	LogDir                                          string          `json:"log_dir"`
 	PersistenceDialect                              string          `json:"persistence_dialect"`
 	ListenAddress                                   string          `json:"listen_address"`
+	DeploymentProfile                               string          `json:"deployment_profile"`
+	Socks5AdvertiseHost                             string          `json:"socks5_advertise_host"`
 	ResinPort                                       int             `json:"resin_port"`
+	Socks5Port                                      int             `json:"socks5_port"`
 	APIMaxBodyBytes                                 int             `json:"api_max_body_bytes"`
 	MaxLatencyTableEntries                          int             `json:"max_latency_table_entries"`
 	ProbeConcurrency                                int             `json:"probe_concurrency"`
@@ -111,7 +114,10 @@ func systemEnvConfigSnapshot(envCfg *config.EnvConfig) *systemEnvConfigResponse 
 		LogDir:                                envCfg.LogDir,
 		PersistenceDialect:                    envCfg.PersistenceDialect,
 		ListenAddress:                         envCfg.ListenAddress,
+		DeploymentProfile:                     string(envCfg.DeploymentProfile),
+		Socks5AdvertiseHost:                   envCfg.Socks5AdvertiseHost,
 		ResinPort:                             envCfg.ResinPort,
+		Socks5Port:                            envCfg.Socks5Port,
 		APIMaxBodyBytes:                       envCfg.APIMaxBodyBytes,
 		MaxLatencyTableEntries:                envCfg.MaxLatencyTableEntries,
 		ProbeConcurrency:                      envCfg.ProbeConcurrency,

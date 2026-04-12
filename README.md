@@ -20,14 +20,14 @@
 
 **Resin** is a **high-performance intelligent proxy pool gateway** built for operating massive numbers of proxy nodes.
 
-It helps shield your services from unstable upstream proxies and aggregates them into a single HTTP gateway with **session stickiness (sticky routing)**.
+It helps shield your services from unstable upstream proxies and aggregates them into a single gateway surface with **session stickiness (sticky routing)** across HTTP and optional SOCKS5 access.
 
 ## 💡 Why Resin?
 
 - **Massive-scale management**: Easily handles 100k+ proxy nodes with native high-concurrency performance.
 - **Smart scheduling and circuit breaking**: Fully automated **passive + active** health checks, outbound IP probing, and latency analysis to remove bad nodes precisely. Uses P2C plus domain-aware latency-weighted scoring for optimal node selection.
 - **Business-friendly sticky proxying**: Keeps the same business account bound to a stable outbound IP. If a node fails, Resin seamlessly switches to another node with the same IP.
-- **Dual access modes**: Supports both standard forward proxy (HTTP Proxy) and URL-based reverse proxy.
+- **Multiple access modes**: Supports standard forward proxy (HTTP Proxy), SOCKS5 inbound, and URL-based reverse proxy.
 - **Observability**: Detailed metrics and logs, plus a visual Web UI. Includes complete structured request logs for querying and auditing by platform, account, target site, and more.
 - **Simple and powerful**: Works out of the box with default settings, while still offering deep customization for enterprise-grade needs.
 - **Cross-subscription deduplication**: Automatically merges identical nodes from different subscriptions and shares their health state.
@@ -86,8 +86,12 @@ services:
       RESIN_PROXY_TOKEN: "my-token" # Change to your proxy password
       RESIN_LISTEN_ADDRESS: 0.0.0.0
       RESIN_PORT: 2260
+      RESIN_DEPLOYMENT_PROFILE: STANDARD # STANDARD = CONNECT + UDP ASSOCIATE, KOYEB_TCP = CONNECT only
+      RESIN_SOCKS5_PORT: 0 # Set to 1080 (or another port) to enable SOCKS5 inbound
+      RESIN_SOCKS5_ADVERTISE_HOST: "" # Set a public IP/domain when using UDP ASSOCIATE behind NAT/containers
     ports:
       - "2260:2260"
+      # - "1080:1080" # Uncomment when RESIN_SOCKS5_PORT is enabled
     volumes:
       - ./data/cache:/var/cache/resin
       - ./data/state:/var/lib/resin
@@ -95,6 +99,29 @@ services:
 ```
 
 Run `docker compose up -d` to start the service.
+
+SOCKS5 deployment notes:
+
+- `RESIN_SOCKS5_PORT=0` keeps SOCKS5 disabled. Set it to a TCP port such as `1080` to start a dedicated SOCKS5 listener in addition to the HTTP listener.
+- `RESIN_DEPLOYMENT_PROFILE=STANDARD` enables full SOCKS5 inbound support: `CONNECT` and `UDP ASSOCIATE`.
+- `RESIN_DEPLOYMENT_PROFILE=KOYEB_TCP` keeps SOCKS5 in TCP-only mode: `CONNECT` is available, `UDP ASSOCIATE` is rejected. This is the intended profile for TCP-only runtimes such as Koyeb.
+- `RESIN_SOCKS5_ADVERTISE_HOST` controls the host returned to clients for UDP ASSOCIATE. Leave it empty for local/same-host testing; set it to your reachable public IP or domain when Resin runs behind NAT, containers, or port mapping.
+- SOCKS5 authentication reuses `RESIN_AUTH_VERSION` and `RESIN_PROXY_TOKEN`. For example, in `V1` mode, clients can use usernames like `Platform.Account` with password `RESIN_PROXY_TOKEN`.
+
+Examples:
+
+```bash
+# VPS / bare metal: full SOCKS5 (TCP + UDP)
+RESIN_DEPLOYMENT_PROFILE=STANDARD
+RESIN_SOCKS5_PORT=1080
+RESIN_SOCKS5_ADVERTISE_HOST=your-public-ip-or-domain
+```
+
+```bash
+# Koyeb or other TCP-only runtimes: SOCKS5 CONNECT only
+RESIN_DEPLOYMENT_PROFILE=KOYEB_TCP
+RESIN_SOCKS5_PORT=1080
+```
 
 By default, Resin uses local SQLite files for persistence. To switch core state/cache persistence to PostgreSQL, set:
 
@@ -145,6 +172,16 @@ curl -x http://127.0.0.1:2260 \
   -U ":my-token" \
   https://api.ipify.org
 ```
+
+If your client supports SOCKS5, you can also connect to the dedicated SOCKS5 listener after setting `RESIN_SOCKS5_PORT`:
+
+```bash
+curl --proxy socks5h://127.0.0.1:1080 \
+  --proxy-user "Default.user_tom:my-token" \
+  https://api.ipify.org
+```
+
+When `RESIN_AUTH_VERSION=V1`, the SOCKS5 username follows the same `Platform.Account` convention as HTTP forward proxy. When `RESIN_PROXY_TOKEN=""`, Resin still accepts unauthenticated SOCKS5 clients and, if the client offers username/password auth, will parse the username as optional identity.
 
 If your client supports overriding `BASE_URL`, you can also use reverse-proxy mode.
 URL format: `/token/Platform(optional).Account(optional)/protocol/target`.

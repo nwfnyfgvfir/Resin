@@ -43,7 +43,10 @@ func TestLoadEnvConfig_Defaults(t *testing.T) {
 	assertEqual(t, "ListenAddress", cfg.ListenAddress, "0.0.0.0")
 
 	// Ports
+	assertEqual(t, "DeploymentProfile", cfg.DeploymentProfile, DeploymentProfileStandard)
+	assertEqual(t, "Socks5AdvertiseHost", cfg.Socks5AdvertiseHost, "")
 	assertEqual(t, "ResinPort", cfg.ResinPort, 2260)
+	assertEqual(t, "Socks5Port", cfg.Socks5Port, 0)
 	assertEqual(t, "APIMaxBodyBytes", cfg.APIMaxBodyBytes, 1<<20)
 
 	// Core
@@ -102,7 +105,10 @@ func TestLoadEnvConfig_EnvOverrides(t *testing.T) {
 	envs["RESIN_DATABASE_MAX_OPEN_CONNS"] = "20"
 	envs["RESIN_DATABASE_MAX_IDLE_CONNS"] = "8"
 	envs["RESIN_LISTEN_ADDRESS"] = "127.0.0.1"
+	envs["RESIN_DEPLOYMENT_PROFILE"] = "KOYEB_TCP"
+	envs["RESIN_SOCKS5_ADVERTISE_HOST"] = "socks.resin.test"
 	envs["RESIN_PORT"] = "8080"
+	envs["RESIN_SOCKS5_PORT"] = "1080"
 	envs["RESIN_API_MAX_BODY_BYTES"] = "2097152"
 	envs["RESIN_PROBE_CONCURRENCY"] = "500"
 	envs["RESIN_GEOIP_UPDATE_SCHEDULE"] = "0 0 * * *"
@@ -132,7 +138,10 @@ func TestLoadEnvConfig_EnvOverrides(t *testing.T) {
 	assertEqual(t, "DatabaseMaxOpenConn", cfg.DatabaseMaxOpenConn, 20)
 	assertEqual(t, "DatabaseMaxIdleConn", cfg.DatabaseMaxIdleConn, 8)
 	assertEqual(t, "ListenAddress", cfg.ListenAddress, "127.0.0.1")
+	assertEqual(t, "DeploymentProfile", cfg.DeploymentProfile, DeploymentProfileKoyebTCP)
+	assertEqual(t, "Socks5AdvertiseHost", cfg.Socks5AdvertiseHost, "socks.resin.test")
 	assertEqual(t, "ResinPort", cfg.ResinPort, 8080)
+	assertEqual(t, "Socks5Port", cfg.Socks5Port, 1080)
 	assertEqual(t, "APIMaxBodyBytes", cfg.APIMaxBodyBytes, 2097152)
 	assertEqual(t, "ProbeConcurrency", cfg.ProbeConcurrency, 500)
 	assertEqual(t, "GeoIPUpdateSchedule", cfg.GeoIPUpdateSchedule, "0 0 * * *")
@@ -423,6 +432,71 @@ func TestLoadEnvConfig_InvalidAPIMaxBodyBytes(t *testing.T) {
 		t.Fatal("expected error for non-positive API max body bytes")
 	}
 	assertContains(t, err.Error(), "RESIN_API_MAX_BODY_BYTES")
+}
+
+func TestNormalizeDeploymentProfile(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want DeploymentProfile
+	}{
+		{name: "empty defaults to standard", raw: "", want: DeploymentProfileStandard},
+		{name: "exact standard", raw: "STANDARD", want: DeploymentProfileStandard},
+		{name: "trim and uppercase", raw: " koyeb_tcp ", want: DeploymentProfileKoyebTCP},
+		{name: "invalid", raw: "UNKNOWN", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := NormalizeDeploymentProfile(tt.raw); got != tt.want {
+				t.Fatalf("NormalizeDeploymentProfile(%q): got %q, want %q", tt.raw, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDeploymentProfileAllowsSocks5Capabilities(t *testing.T) {
+	if !DeploymentProfileStandard.AllowsSocks5TCP() {
+		t.Fatal("STANDARD should allow SOCKS5 TCP")
+	}
+	if !DeploymentProfileStandard.AllowsSocks5UDP() {
+		t.Fatal("STANDARD should allow SOCKS5 UDP")
+	}
+	if !DeploymentProfileKoyebTCP.AllowsSocks5TCP() {
+		t.Fatal("KOYEB_TCP should allow SOCKS5 TCP")
+	}
+	if DeploymentProfileKoyebTCP.AllowsSocks5UDP() {
+		t.Fatal("KOYEB_TCP should not allow SOCKS5 UDP")
+	}
+	if DeploymentProfile("UNKNOWN").AllowsSocks5TCP() {
+		t.Fatal("unknown profile should not allow SOCKS5 TCP")
+	}
+	if DeploymentProfile("UNKNOWN").AllowsSocks5UDP() {
+		t.Fatal("unknown profile should not allow SOCKS5 UDP")
+	}
+}
+
+func TestLoadEnvConfig_InvalidDeploymentProfile(t *testing.T) {
+	envs := requiredEnvs()
+	envs["RESIN_DEPLOYMENT_PROFILE"] = "UNKNOWN"
+	setEnvs(t, envs)
+
+	_, err := LoadEnvConfig()
+	if err == nil {
+		t.Fatal("expected error for invalid deployment profile")
+	}
+	assertContains(t, err.Error(), "RESIN_DEPLOYMENT_PROFILE")
+}
+
+func TestLoadEnvConfig_InvalidSocks5Port(t *testing.T) {
+	envs := requiredEnvs()
+	envs["RESIN_SOCKS5_PORT"] = "65536"
+	setEnvs(t, envs)
+
+	_, err := LoadEnvConfig()
+	if err == nil {
+		t.Fatal("expected error for SOCKS5 port out of range")
+	}
+	assertContains(t, err.Error(), "RESIN_SOCKS5_PORT")
 }
 
 func TestLoadEnvConfig_QueueSizeTooSmall(t *testing.T) {

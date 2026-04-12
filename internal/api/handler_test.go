@@ -21,7 +21,10 @@ func newTestServer() *Server {
 		StateDir:                              "/tmp/resin/state",
 		LogDir:                                "/tmp/resin/log",
 		ListenAddress:                         "127.0.0.1",
+		DeploymentProfile:                     config.DeploymentProfileStandard,
+		Socks5AdvertiseHost:                   "socks.resin.test",
 		ResinPort:                             2260,
+		Socks5Port:                            1080,
 		APIMaxBodyBytes:                       1 << 20,
 		MaxLatencyTableEntries:                12,
 		ProbeConcurrency:                      1000,
@@ -307,6 +310,15 @@ func TestSystemEnvConfig_OK(t *testing.T) {
 	}
 	if body["listen_address"] != "127.0.0.1" {
 		t.Errorf("listen_address: got %q, want %q", body["listen_address"], "127.0.0.1")
+	}
+	if body["deployment_profile"] != "STANDARD" {
+		t.Errorf("deployment_profile: got %q, want %q", body["deployment_profile"], "STANDARD")
+	}
+	if body["socks5_advertise_host"] != "socks.resin.test" {
+		t.Errorf("socks5_advertise_host: got %q, want %q", body["socks5_advertise_host"], "socks.resin.test")
+	}
+	if body["socks5_port"] != float64(1080) {
+		t.Errorf("socks5_port: got %v, want %d", body["socks5_port"], 1080)
 	}
 	if body["default_platform_sticky_ttl"] != "168h0m0s" {
 		t.Errorf("default_platform_sticky_ttl: got %q, want %q", body["default_platform_sticky_ttl"], "168h0m0s")

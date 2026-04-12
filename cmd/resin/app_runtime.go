@@ -42,6 +42,8 @@ type resinApp struct {
 	requestlogSvc  *requestlog.Service
 	inboundSrv     *http.Server
 	inboundLn      net.Listener
+	socks5Proxy    *proxy.Socks5Proxy
+	socks5Ln       net.Listener
 	transportPool  *proxy.OutboundTransportPool
 }
 
@@ -421,6 +423,21 @@ func (a *resinApp) buildNetworkServers(engine *state.StateEngine) error {
 		OutboundTransport: outboundTransportCfg,
 		TransportPool:     a.transportPool,
 	})
+	if a.envCfg.Socks5Port > 0 && a.envCfg.DeploymentProfile.AllowsSocks5TCP() {
+		a.socks5Proxy = proxy.NewSocks5Proxy(proxy.Socks5ProxyConfig{
+			ProxyToken:        a.envCfg.ProxyToken,
+			AuthVersion:       string(a.envCfg.AuthVersion),
+			DeploymentProfile: a.envCfg.DeploymentProfile,
+			AdvertiseHost:     a.envCfg.Socks5AdvertiseHost,
+			ListenAddress:     a.envCfg.ListenAddress,
+			ListenPort:        a.envCfg.Socks5Port,
+			Router:            a.topoRuntime.router,
+			Pool:              a.topoRuntime.pool,
+			Health:            a.topoRuntime.pool,
+			Events:            proxyEvents,
+			MetricsSink:       a.metricsManager,
+		})
+	}
 
 	reverseProxy := proxy.NewReverseProxy(proxy.ReverseProxyConfig{
 		ProxyToken:        a.envCfg.ProxyToken,
@@ -449,6 +466,15 @@ func (a *resinApp) buildNetworkServers(engine *state.StateEngine) error {
 	}
 	a.inboundLn = proxy.NewCountingListener(inboundLn, a.metricsManager)
 	a.inboundSrv = &http.Server{Handler: inboundHandler}
+
+	if a.socks5Proxy != nil {
+		socks5Ln, err := net.Listen("tcp", formatListenAddress(a.envCfg.ListenAddress, a.envCfg.Socks5Port))
+		if err != nil {
+			_ = a.inboundLn.Close()
+			return fmt.Errorf("socks5 server listen: %w", err)
+		}
+		a.socks5Ln = proxy.NewCountingListener(socks5Ln, a.metricsManager)
+	}
 
 	return nil
 }
@@ -496,6 +522,12 @@ func (a *resinApp) startServers() <-chan error {
 		log.Printf("Resin server starting on %s", formatListenURL(a.envCfg.ListenAddress, a.envCfg.ResinPort))
 		reportServerErr("resin server", a.inboundSrv.Serve(a.inboundLn))
 	}()
+	if a.socks5Proxy != nil && a.socks5Ln != nil {
+		go func() {
+			log.Printf("SOCKS5 server starting on %s", formatListenAddress(a.envCfg.ListenAddress, a.envCfg.Socks5Port))
+			reportServerErr("socks5 server", a.socks5Proxy.Serve(a.socks5Ln))
+		}()
+	}
 
 	return serverErrCh
 }
@@ -524,6 +556,12 @@ func formatListenURL(listenAddress string, port int) string {
 }
 
 func (a *resinApp) shutdown(ctx context.Context) {
+	if a.socks5Ln != nil {
+		if err := a.socks5Ln.Close(); err != nil {
+			log.Printf("SOCKS5 server close error: %v", err)
+		}
+		log.Println("SOCKS5 server stopped")
+	}
 	if err := a.inboundSrv.Shutdown(ctx); err != nil {
 		log.Printf("Server shutdown error: %v", err)
 	}

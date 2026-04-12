@@ -15,6 +15,37 @@ import (
 )
 
 // EnvConfig holds all environment-variable-driven settings (not hot-updatable).
+type DeploymentProfile string
+
+const (
+	DeploymentProfileStandard DeploymentProfile = "STANDARD"
+	DeploymentProfileKoyebTCP DeploymentProfile = "KOYEB_TCP"
+)
+
+func NormalizeDeploymentProfile(raw string) DeploymentProfile {
+	switch strings.ToUpper(strings.TrimSpace(raw)) {
+	case string(DeploymentProfileStandard), "":
+		return DeploymentProfileStandard
+	case string(DeploymentProfileKoyebTCP):
+		return DeploymentProfileKoyebTCP
+	default:
+		return ""
+	}
+}
+
+func (p DeploymentProfile) AllowsSocks5TCP() bool {
+	switch p {
+	case DeploymentProfileStandard, DeploymentProfileKoyebTCP:
+		return true
+	default:
+		return false
+	}
+}
+
+func (p DeploymentProfile) AllowsSocks5UDP() bool {
+	return p == DeploymentProfileStandard
+}
+
 type EnvConfig struct {
 	// Directories
 	CacheDir string
@@ -28,10 +59,13 @@ type EnvConfig struct {
 	DatabaseMaxIdleConn int
 
 	// Network
-	ListenAddress string
+	ListenAddress       string
+	DeploymentProfile   DeploymentProfile
+	Socks5AdvertiseHost string
 
 	// Ports
 	ResinPort       int
+	Socks5Port      int
 	APIMaxBodyBytes int
 
 	// Core
@@ -92,9 +126,12 @@ func LoadEnvConfig() (*EnvConfig, error) {
 	cfg.DatabaseMaxOpenConn = envInt("RESIN_DATABASE_MAX_OPEN_CONNS", 10, &errs)
 	cfg.DatabaseMaxIdleConn = envInt("RESIN_DATABASE_MAX_IDLE_CONNS", 5, &errs)
 	cfg.ListenAddress = strings.TrimSpace(envStr("RESIN_LISTEN_ADDRESS", "0.0.0.0"))
+	cfg.DeploymentProfile = NormalizeDeploymentProfile(envStr("RESIN_DEPLOYMENT_PROFILE", string(DeploymentProfileStandard)))
+	cfg.Socks5AdvertiseHost = strings.TrimSpace(envStr("RESIN_SOCKS5_ADVERTISE_HOST", ""))
 
 	// --- Ports ---
 	cfg.ResinPort = envInt("RESIN_PORT", 2260, &errs)
+	cfg.Socks5Port = envInt("RESIN_SOCKS5_PORT", 0, &errs)
 	cfg.APIMaxBodyBytes = envInt("RESIN_API_MAX_BODY_BYTES", 1<<20, &errs)
 
 	// --- Core ---
@@ -226,8 +263,14 @@ func LoadEnvConfig() (*EnvConfig, error) {
 	if cfg.ListenAddress == "" {
 		errs = append(errs, "RESIN_LISTEN_ADDRESS must not be empty")
 	}
+	if cfg.DeploymentProfile == "" {
+		errs = append(errs, fmt.Sprintf("RESIN_DEPLOYMENT_PROFILE: invalid value %q (allowed: %s, %s)", envStr("RESIN_DEPLOYMENT_PROFILE", string(DeploymentProfileStandard)), DeploymentProfileStandard, DeploymentProfileKoyebTCP))
+	}
 
 	validatePort("RESIN_PORT", cfg.ResinPort, &errs)
+	if cfg.Socks5Port < 0 || cfg.Socks5Port > 65535 {
+		errs = append(errs, fmt.Sprintf("RESIN_SOCKS5_PORT: port must be 0-65535, got %d", cfg.Socks5Port))
+	}
 	validatePositive("RESIN_API_MAX_BODY_BYTES", cfg.APIMaxBodyBytes, &errs)
 
 	validatePositive("RESIN_MAX_LATENCY_TABLE_ENTRIES", cfg.MaxLatencyTableEntries, &errs)

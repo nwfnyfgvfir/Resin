@@ -91,6 +91,9 @@ func newControlPlaneTestServerWithBodyLimit(
 		MatcherRuntime: proxy.NewAccountMatcherRuntime(nil),
 		RuntimeCfg:     runtimeCfg,
 		EnvCfg: &config.EnvConfig{
+			DeploymentProfile:                               config.DeploymentProfileStandard,
+			Socks5AdvertiseHost:                             "contract.socks.test",
+			Socks5Port:                                      1080,
 			DefaultPlatformStickyTTL:                        30 * time.Minute,
 			DefaultPlatformRegexFilters:                     []string{},
 			DefaultPlatformRegionFilters:                    []string{},
@@ -1088,6 +1091,15 @@ func TestAPIContract_SystemEnvConfigSnapshot(t *testing.T) {
 	if body["persistence_dialect"] != "" {
 		t.Fatalf("persistence_dialect: got %v, want empty string", body["persistence_dialect"])
 	}
+	if body["deployment_profile"] != string(cp.EnvCfg.DeploymentProfile) {
+		t.Fatalf("deployment_profile: got %v, want %s", body["deployment_profile"], cp.EnvCfg.DeploymentProfile)
+	}
+	if body["socks5_advertise_host"] != cp.EnvCfg.Socks5AdvertiseHost {
+		t.Fatalf("socks5_advertise_host: got %v, want %s", body["socks5_advertise_host"], cp.EnvCfg.Socks5AdvertiseHost)
+	}
+	if body["socks5_port"] != float64(cp.EnvCfg.Socks5Port) {
+		t.Fatalf("socks5_port: got %v, want %d", body["socks5_port"], cp.EnvCfg.Socks5Port)
+	}
 	if body["default_platform_sticky_ttl"] != cp.EnvCfg.DefaultPlatformStickyTTL.String() {
 		t.Fatalf(
 			"default_platform_sticky_ttl: got %v, want %s",
@@ -1726,7 +1738,7 @@ func TestAPIContract_RequestLogEndpoints(t *testing.T) {
 		"/api/v1/request-logs?limit=100001",
 		"/api/v1/request-logs?offset=1",
 		"/api/v1/request-logs?cursor=not-base64",
-		"/api/v1/request-logs?proxy_type=3",
+		"/api/v1/request-logs?proxy_type=4",
 		"/api/v1/request-logs?net_ok=2",
 		"/api/v1/request-logs?net_ok=1",
 		"/api/v1/request-logs?net_ok=maybe",

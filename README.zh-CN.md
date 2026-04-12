@@ -18,14 +18,14 @@
 
 **Resin** 是一个专为接管海量节点设计的**高性能智能代理池网关**。
 
-它用于在上层屏蔽底层代理节点的不稳定性，将分散节点聚合为一个支持 **“会话保持（粘性路由）”** 的 HTTP 流量网关。
+它用于在上层屏蔽底层代理节点的不稳定性，将分散节点聚合为一个支持 **“会话保持（粘性路由）”** 的统一网关入口，同时支持 HTTP 与可选的 SOCKS5 入站。
 
 ## 💡 为什么选择 Resin？
 
 - **海量接管**：轻松管理十万级规模的代理节点。高性能，原生支持高并发。
 - **智能调度与熔断**：全自动的 **被动+主动** 健康探测、出口 IP 探测、延迟分析，精准剔除坏节点。采用 P2C 算法结合按域名的延迟加权评分，智能选择最优节点。
 - **业务友好的粘性代理**：让同一业务账号优先绑定同一出口 IP，节点异常时自动切换同 IP 节点，在多数场景下减少业务波动。
-- **双模接入**：同时支持标准正向代理（HTTP Proxy）与 URL 反向代理（Reverse Proxy）。
+- **多种接入模式**：同时支持标准正向代理（HTTP Proxy）、SOCKS5 入站与 URL 反向代理（Reverse Proxy）。
 - **可观测性**：提供详细的性能指标与日志记录，快速掌控全局（可视化 Web 管理后台）。包括完整的结构化请求日志，支持按平台、账号、目标站点等维度查询与审计。
 - **简单与强大兼得**：开箱即用的默认配置与深度自定义功能。无论你是只需几分钟跑通简单场景的个人使用者，还是需要高并发与高可用性的企业级团队，Resin 都能游刃有余。
 - **跨订阅智能去重**：不同订阅中配置相同的节点自动合并，共享健康状态，避免重复探测。
@@ -86,14 +86,41 @@ services:
       RESIN_PROXY_TOKEN: "my-token" # 修改为你的代理密码
       RESIN_LISTEN_ADDRESS: 0.0.0.0
       RESIN_PORT: 2260
+      RESIN_DEPLOYMENT_PROFILE: STANDARD # STANDARD = CONNECT + UDP ASSOCIATE，KOYEB_TCP = 仅 CONNECT
+      RESIN_SOCKS5_PORT: 0 # 设为 1080 等端口即可启用 SOCKS5 入站
+      RESIN_SOCKS5_ADVERTISE_HOST: "" # 在 NAT/容器/端口映射场景下建议设置公网 IP 或域名
     ports:
       - "2260:2260"
+      # - "1080:1080" # 启用 RESIN_SOCKS5_PORT 后取消注释
     volumes:
       - ./data/cache:/var/cache/resin
       - ./data/state:/var/lib/resin
       - ./data/log:/var/log/resin
 ```
 运行 `docker compose up -d` 启动服务。
+
+SOCKS5 部署说明：
+
+- `RESIN_SOCKS5_PORT=0` 表示默认关闭 SOCKS5。将其设置为 `1080` 等端口后，Resin 会在 HTTP 监听器之外额外启动一个独立的 SOCKS5 TCP 监听器。
+- `RESIN_DEPLOYMENT_PROFILE=STANDARD` 时，SOCKS5 入站支持完整能力：`CONNECT` 与 `UDP ASSOCIATE`。
+- `RESIN_DEPLOYMENT_PROFILE=KOYEB_TCP` 时，SOCKS5 仅保留 TCP 模式：允许 `CONNECT`，拒绝 `UDP ASSOCIATE`。这就是面向 Koyeb 这类仅支持 TCP 运行环境的推荐配置。
+- `RESIN_SOCKS5_ADVERTISE_HOST` 用于控制 UDP ASSOCIATE 返回给客户端的地址。单机本地测试可留空；若部署在 NAT、容器或端口映射之后，应该填写客户端可达的公网 IP 或域名。
+- SOCKS5 认证复用 `RESIN_AUTH_VERSION` 与 `RESIN_PROXY_TOKEN`。例如在 `V1` 模式下，客户端可以使用 `Platform.Account` 作为用户名、`RESIN_PROXY_TOKEN` 作为密码。
+
+示例：
+
+```bash
+# VPS / 裸机：完整 SOCKS5（TCP + UDP）
+RESIN_DEPLOYMENT_PROFILE=STANDARD
+RESIN_SOCKS5_PORT=1080
+RESIN_SOCKS5_ADVERTISE_HOST=your-public-ip-or-domain
+```
+
+```bash
+# Koyeb 或其他仅 TCP 平台：仅 SOCKS5 CONNECT
+RESIN_DEPLOYMENT_PROFILE=KOYEB_TCP
+RESIN_SOCKS5_PORT=1080
+```
 
 默认情况下，Resin 使用本地 SQLite 文件持久化。若要将核心 `state/cache` 持久化切换到 PostgreSQL，请设置：
 
@@ -133,12 +160,21 @@ RESIN_DATABASE_MAX_IDLE_CONNS=5
 启动 Resin 服务后，给你的应用程序接入 `http://127.0.0.1:2260` 代理即可。  
 如果你不想设置代理密码，请将环境变量显式设为空字符串：`RESIN_PROXY_TOKEN=""`（变量必须定义）。此时可直接接入 `http://127.0.0.1:2260`。下面是使用 curl 的一个例子：
 
-
 ```bash
 curl -x http://127.0.0.1:2260 \
   -U ":my-token" \
   https://api.ipify.org
 ```
+
+如果你的客户端支持 SOCKS5，那么在设置 `RESIN_SOCKS5_PORT` 后，也可以直接接入 Resin 的独立 SOCKS5 监听端口：
+
+```bash
+curl --proxy socks5h://127.0.0.1:1080 \
+  --proxy-user "Default.user_tom:my-token" \
+  https://api.ipify.org
+```
+
+当 `RESIN_AUTH_VERSION=V1` 时，SOCKS5 用户名沿用与 HTTP 正向代理相同的 `Platform.Account` 规则。当 `RESIN_PROXY_TOKEN=""` 时，Resin 仍然接受无密码 SOCKS5 客户端；如果客户端主动提供用户名/密码认证，Resin 也会把用户名解析为可选身份信息。
 
 如果你的客户端支持修改服务的 `BASE_URL`，你也可以尝试反向代理接入。URL 格式为：`/令牌/Platform(可选).Account(可选)/协议/目标地址`。例如，你可以通过下面的 curl 命令通过 Resin 访问 `https://api.ipify.org`。
 
