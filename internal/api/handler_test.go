@@ -317,8 +317,14 @@ func TestSystemEnvConfig_OK(t *testing.T) {
 	if body["socks5_advertise_host"] != "socks.resin.test" {
 		t.Errorf("socks5_advertise_host: got %q, want %q", body["socks5_advertise_host"], "socks.resin.test")
 	}
+	if body["socks5_shared_on_resin_port"] != false {
+		t.Errorf("socks5_shared_on_resin_port: got %v, want false", body["socks5_shared_on_resin_port"])
+	}
 	if body["socks5_port"] != float64(1080) {
 		t.Errorf("socks5_port: got %v, want %d", body["socks5_port"], 1080)
+	}
+	if body["effective_socks5_port"] != float64(1080) {
+		t.Errorf("effective_socks5_port: got %v, want %d", body["effective_socks5_port"], 1080)
 	}
 	if body["default_platform_sticky_ttl"] != "168h0m0s" {
 		t.Errorf("default_platform_sticky_ttl: got %q, want %q", body["default_platform_sticky_ttl"], "168h0m0s")

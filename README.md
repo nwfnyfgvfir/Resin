@@ -86,12 +86,12 @@ services:
       RESIN_PROXY_TOKEN: "my-token" # Change to your proxy password
       RESIN_LISTEN_ADDRESS: 0.0.0.0
       RESIN_PORT: 2260
-      RESIN_DEPLOYMENT_PROFILE: STANDARD # STANDARD = CONNECT + UDP ASSOCIATE, KOYEB_TCP = CONNECT only
-      RESIN_SOCKS5_PORT: 0 # Set to 1080 (or another port) to enable SOCKS5 inbound
+      RESIN_DEPLOYMENT_PROFILE: STANDARD # STANDARD = CONNECT + UDP ASSOCIATE, KOYEB_TCP = single-port CONNECT mode on RESIN_PORT
+      RESIN_SOCKS5_PORT: 0 # STANDARD: set 1080 to enable a dedicated SOCKS5 port; KOYEB_TCP: keep 0 or set equal to RESIN_PORT
       RESIN_SOCKS5_ADVERTISE_HOST: "" # Set a public IP/domain when using UDP ASSOCIATE behind NAT/containers
     ports:
       - "2260:2260"
-      # - "1080:1080" # Uncomment when RESIN_SOCKS5_PORT is enabled
+      # - "1080:1080" # STANDARD only: uncomment when using a dedicated SOCKS5 port
     volumes:
       - ./data/cache:/var/cache/resin
       - ./data/state:/var/lib/resin
@@ -102,9 +102,9 @@ Run `docker compose up -d` to start the service.
 
 SOCKS5 deployment notes:
 
-- `RESIN_SOCKS5_PORT=0` keeps SOCKS5 disabled. Set it to a TCP port such as `1080` to start a dedicated SOCKS5 listener in addition to the HTTP listener.
-- `RESIN_DEPLOYMENT_PROFILE=STANDARD` enables full SOCKS5 inbound support: `CONNECT` and `UDP ASSOCIATE`.
-- `RESIN_DEPLOYMENT_PROFILE=KOYEB_TCP` keeps SOCKS5 in TCP-only mode: `CONNECT` is available, `UDP ASSOCIATE` is rejected. This is the intended profile for TCP-only runtimes such as Koyeb.
+- `RESIN_DEPLOYMENT_PROFILE=STANDARD` uses the original split-port model. Set `RESIN_SOCKS5_PORT` to a TCP port such as `1080` to start a dedicated SOCKS5 listener in addition to the HTTP listener.
+- `RESIN_DEPLOYMENT_PROFILE=KOYEB_TCP` switches Resin to single-port mode on `RESIN_PORT`: HTTP proxy, reverse proxy, control-plane routes, and SOCKS5 `CONNECT` all share the same TCP port. `UDP ASSOCIATE` is still rejected.
+- In `KOYEB_TCP`, keep `RESIN_SOCKS5_PORT=0` for the simplest setup, or set it equal to `RESIN_PORT` if you want the config snapshot to show the shared port explicitly. Any other value is invalid in this profile.
 - `RESIN_SOCKS5_ADVERTISE_HOST` controls the host returned to clients for UDP ASSOCIATE. Leave it empty for local/same-host testing; set it to your reachable public IP or domain when Resin runs behind NAT, containers, or port mapping.
 - SOCKS5 authentication reuses `RESIN_AUTH_VERSION` and `RESIN_PROXY_TOKEN`. For example, in `V1` mode, clients can use usernames like `Platform.Account` with password `RESIN_PROXY_TOKEN`.
 
@@ -118,9 +118,9 @@ RESIN_SOCKS5_ADVERTISE_HOST=your-public-ip-or-domain
 ```
 
 ```bash
-# Koyeb or other TCP-only runtimes: SOCKS5 CONNECT only
+# Koyeb or other TCP-only runtimes: single-port mode on RESIN_PORT
 RESIN_DEPLOYMENT_PROFILE=KOYEB_TCP
-RESIN_SOCKS5_PORT=1080
+RESIN_SOCKS5_PORT=0
 ```
 
 By default, Resin uses local SQLite files for persistence. To switch core state/cache persistence to PostgreSQL, set:
@@ -173,10 +173,18 @@ curl -x http://127.0.0.1:2260 \
   https://api.ipify.org
 ```
 
-If your client supports SOCKS5, you can also connect to the dedicated SOCKS5 listener after setting `RESIN_SOCKS5_PORT`:
+If your client supports SOCKS5, you can also connect through SOCKS5:
 
 ```bash
+# STANDARD with a dedicated SOCKS5 port
 curl --proxy socks5h://127.0.0.1:1080 \
+  --proxy-user "Default.user_tom:my-token" \
+  https://api.ipify.org
+```
+
+```bash
+# KOYEB_TCP single-port mode: SOCKS5 shares RESIN_PORT
+curl --proxy socks5h://127.0.0.1:2260 \
   --proxy-user "Default.user_tom:my-token" \
   https://api.ipify.org
 ```

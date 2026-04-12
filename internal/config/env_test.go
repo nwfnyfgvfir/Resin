@@ -108,7 +108,7 @@ func TestLoadEnvConfig_EnvOverrides(t *testing.T) {
 	envs["RESIN_DEPLOYMENT_PROFILE"] = "KOYEB_TCP"
 	envs["RESIN_SOCKS5_ADVERTISE_HOST"] = "socks.resin.test"
 	envs["RESIN_PORT"] = "8080"
-	envs["RESIN_SOCKS5_PORT"] = "1080"
+	envs["RESIN_SOCKS5_PORT"] = "8080"
 	envs["RESIN_API_MAX_BODY_BYTES"] = "2097152"
 	envs["RESIN_PROBE_CONCURRENCY"] = "500"
 	envs["RESIN_GEOIP_UPDATE_SCHEDULE"] = "0 0 * * *"
@@ -141,7 +141,7 @@ func TestLoadEnvConfig_EnvOverrides(t *testing.T) {
 	assertEqual(t, "DeploymentProfile", cfg.DeploymentProfile, DeploymentProfileKoyebTCP)
 	assertEqual(t, "Socks5AdvertiseHost", cfg.Socks5AdvertiseHost, "socks.resin.test")
 	assertEqual(t, "ResinPort", cfg.ResinPort, 8080)
-	assertEqual(t, "Socks5Port", cfg.Socks5Port, 1080)
+	assertEqual(t, "Socks5Port", cfg.Socks5Port, 8080)
 	assertEqual(t, "APIMaxBodyBytes", cfg.APIMaxBodyBytes, 2097152)
 	assertEqual(t, "ProbeConcurrency", cfg.ProbeConcurrency, 500)
 	assertEqual(t, "GeoIPUpdateSchedule", cfg.GeoIPUpdateSchedule, "0 0 * * *")
@@ -461,17 +461,26 @@ func TestDeploymentProfileAllowsSocks5Capabilities(t *testing.T) {
 	if !DeploymentProfileStandard.AllowsSocks5UDP() {
 		t.Fatal("STANDARD should allow SOCKS5 UDP")
 	}
+	if DeploymentProfileStandard.SharesSocks5OnResinPort() {
+		t.Fatal("STANDARD should not share SOCKS5 on RESIN_PORT")
+	}
 	if !DeploymentProfileKoyebTCP.AllowsSocks5TCP() {
 		t.Fatal("KOYEB_TCP should allow SOCKS5 TCP")
 	}
 	if DeploymentProfileKoyebTCP.AllowsSocks5UDP() {
 		t.Fatal("KOYEB_TCP should not allow SOCKS5 UDP")
 	}
+	if !DeploymentProfileKoyebTCP.SharesSocks5OnResinPort() {
+		t.Fatal("KOYEB_TCP should share SOCKS5 on RESIN_PORT")
+	}
 	if DeploymentProfile("UNKNOWN").AllowsSocks5TCP() {
 		t.Fatal("unknown profile should not allow SOCKS5 TCP")
 	}
 	if DeploymentProfile("UNKNOWN").AllowsSocks5UDP() {
 		t.Fatal("unknown profile should not allow SOCKS5 UDP")
+	}
+	if DeploymentProfile("UNKNOWN").SharesSocks5OnResinPort() {
+		t.Fatal("unknown profile should not share SOCKS5 on RESIN_PORT")
 	}
 }
 
@@ -497,6 +506,20 @@ func TestLoadEnvConfig_InvalidSocks5Port(t *testing.T) {
 		t.Fatal("expected error for SOCKS5 port out of range")
 	}
 	assertContains(t, err.Error(), "RESIN_SOCKS5_PORT")
+}
+
+func TestLoadEnvConfig_KoyebTCPRejectsMismatchedDedicatedSocks5Port(t *testing.T) {
+	envs := requiredEnvs()
+	envs["RESIN_DEPLOYMENT_PROFILE"] = "KOYEB_TCP"
+	envs["RESIN_PORT"] = "2260"
+	envs["RESIN_SOCKS5_PORT"] = "1080"
+	setEnvs(t, envs)
+
+	_, err := LoadEnvConfig()
+	if err == nil {
+		t.Fatal("expected error for mismatched KOYEB_TCP socks5 port")
+	}
+	assertContains(t, err.Error(), "RESIN_SOCKS5_PORT must be 0 or match RESIN_PORT when RESIN_DEPLOYMENT_PROFILE=KOYEB_TCP")
 }
 
 func TestLoadEnvConfig_QueueSizeTooSmall(t *testing.T) {

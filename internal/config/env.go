@@ -46,6 +46,10 @@ func (p DeploymentProfile) AllowsSocks5UDP() bool {
 	return p == DeploymentProfileStandard
 }
 
+func (p DeploymentProfile) SharesSocks5OnResinPort() bool {
+	return p == DeploymentProfileKoyebTCP
+}
+
 type EnvConfig struct {
 	// Directories
 	CacheDir string
@@ -270,6 +274,9 @@ func LoadEnvConfig() (*EnvConfig, error) {
 	validatePort("RESIN_PORT", cfg.ResinPort, &errs)
 	if cfg.Socks5Port < 0 || cfg.Socks5Port > 65535 {
 		errs = append(errs, fmt.Sprintf("RESIN_SOCKS5_PORT: port must be 0-65535, got %d", cfg.Socks5Port))
+	}
+	if cfg.DeploymentProfile.SharesSocks5OnResinPort() && cfg.Socks5Port != 0 && cfg.Socks5Port != cfg.ResinPort {
+		errs = append(errs, fmt.Sprintf("RESIN_SOCKS5_PORT must be 0 or match RESIN_PORT when RESIN_DEPLOYMENT_PROFILE=%s", cfg.DeploymentProfile))
 	}
 	validatePositive("RESIN_API_MAX_BODY_BYTES", cfg.APIMaxBodyBytes, &errs)
 

@@ -91,6 +91,10 @@ func (p *Socks5Proxy) Serve(ln net.Listener) error {
 	}
 }
 
+func (p *Socks5Proxy) ServeConn(conn net.Conn) {
+	p.serveConn(conn)
+}
+
 func (p *Socks5Proxy) serveConn(conn net.Conn) {
 	defer conn.Close()
 
