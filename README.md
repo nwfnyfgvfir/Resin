@@ -1,5 +1,7 @@
 [English](README.md) | [简体中文](README.zh-CN.md)
 
+# 基于 https://github.com/Resinat/Resin 二开
+
 <div align="center">
   <img src="webui/public/vite.svg" width="48" alt="Resin Logo" />
   <h1>Resin</h1>
