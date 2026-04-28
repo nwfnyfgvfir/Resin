@@ -22,13 +22,13 @@ func TestAPIContract_SubscriptionBackupExport(t *testing.T) {
 	}
 
 	localRec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/subscriptions", map[string]any{
-		"name":                        "Apple Feed",
-		"source_type":                 "local",
-		"content":                     "vmess://example",
-		"update_interval":             "1h",
-		"enabled":                     false,
-		"ephemeral":                   true,
-		"ephemeral_node_evict_delay":  "6h",
+		"name":                       "Apple Feed",
+		"source_type":                "local",
+		"content":                    "vmess://example",
+		"update_interval":            "1h",
+		"enabled":                    false,
+		"ephemeral":                  true,
+		"ephemeral_node_evict_delay": "6h",
 	}, true)
 	if localRec.Code != http.StatusCreated {
 		t.Fatalf("create local subscription status: got %d, want %d, body=%s", localRec.Code, http.StatusCreated, localRec.Body.String())
@@ -153,10 +153,9 @@ func TestAPIContract_SubscriptionBackupImport(t *testing.T) {
 	}
 
 	legacyGetRec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/subscriptions/"+legacyID, nil, true)
-	if legacyGetRec.Code != http.StatusNotFound {
-		t.Fatalf("legacy subscription should be removed, got status %d body=%s", legacyGetRec.Code, legacyGetRec.Body.String())
+	if legacyGetRec.Code != http.StatusOK {
+		t.Fatalf("legacy subscription should still exist, got status %d body=%s", legacyGetRec.Code, legacyGetRec.Body.String())
 	}
-	assertErrorCode(t, legacyGetRec, "NOT_FOUND")
 
 	listRec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/subscriptions?sort_by=name&sort_order=asc", nil, true)
 	if listRec.Code != http.StatusOK {
@@ -167,8 +166,8 @@ func TestAPIContract_SubscriptionBackupImport(t *testing.T) {
 	if !ok {
 		t.Fatalf("items type: got %T", listBody["items"])
 	}
-	if len(items) != 2 {
-		t.Fatalf("imported items len = %d, want 2, body=%s", len(items), listRec.Body.String())
+	if len(items) != 3 {
+		t.Fatalf("imported items len = %d, want 3, body=%s", len(items), listRec.Body.String())
 	}
 
 	alpha, ok := items[0].(map[string]any)
@@ -178,6 +177,10 @@ func TestAPIContract_SubscriptionBackupImport(t *testing.T) {
 	beta, ok := items[1].(map[string]any)
 	if !ok {
 		t.Fatalf("beta item type: got %T", items[1])
+	}
+	legacyItem, ok := items[2].(map[string]any)
+	if !ok {
+		t.Fatalf("legacy item type: got %T", items[2])
 	}
 	if alpha["name"] != "Alpha Feed" {
 		t.Fatalf("alpha name: got %v, want %q", alpha["name"], "Alpha Feed")
@@ -193,6 +196,50 @@ func TestAPIContract_SubscriptionBackupImport(t *testing.T) {
 	}
 	if beta["enabled"] != false {
 		t.Fatalf("beta enabled: got %v, want false", beta["enabled"])
+	}
+	if legacyItem["name"] != "Legacy Feed" {
+		t.Fatalf("legacy name: got %v, want %q", legacyItem["name"], "Legacy Feed")
+	}
+}
+
+func TestAPIContract_SubscriptionBatchDelete(t *testing.T) {
+	srv, _, _ := newControlPlaneTestServer(t)
+
+	firstRec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/subscriptions", map[string]any{
+		"name": "Alpha Feed",
+		"url":  "https://example.com/alpha",
+	}, true)
+	if firstRec.Code != http.StatusCreated {
+		t.Fatalf("create first subscription status: got %d, want %d, body=%s", firstRec.Code, http.StatusCreated, firstRec.Body.String())
+	}
+	firstID, _ := decodeJSONMap(t, firstRec)["id"].(string)
+
+	secondRec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/subscriptions", map[string]any{
+		"name": "Beta Feed",
+		"url":  "https://example.com/beta",
+	}, true)
+	if secondRec.Code != http.StatusCreated {
+		t.Fatalf("create second subscription status: got %d, want %d, body=%s", secondRec.Code, http.StatusCreated, secondRec.Body.String())
+	}
+	secondID, _ := decodeJSONMap(t, secondRec)["id"].(string)
+
+	deleteRec := doJSONRequest(t, srv, http.MethodDelete, "/api/v1/subscriptions", map[string]any{
+		"subscription_ids": []string{firstID, secondID},
+	}, true)
+	if deleteRec.Code != http.StatusNoContent {
+		t.Fatalf("batch delete subscriptions status: got %d, want %d, body=%s", deleteRec.Code, http.StatusNoContent, deleteRec.Body.String())
+	}
+
+	listRec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/subscriptions", nil, true)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list subscriptions after batch delete status: got %d, want %d, body=%s", listRec.Code, http.StatusOK, listRec.Body.String())
+	}
+	items, ok := decodeJSONMap(t, listRec)["items"].([]any)
+	if !ok {
+		t.Fatalf("items type: got %T", decodeJSONMap(t, listRec)["items"])
+	}
+	if len(items) != 0 {
+		t.Fatalf("remaining items len = %d, want 0", len(items))
 	}
 }
 

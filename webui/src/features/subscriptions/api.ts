@@ -84,6 +84,13 @@ export async function deleteSubscription(id: string): Promise<void> {
   });
 }
 
+export async function deleteSubscriptions(ids: string[]): Promise<void> {
+  await apiRequest<void>(basePath, {
+    method: "DELETE",
+    body: { subscription_ids: ids },
+  });
+}
+
 export async function refreshSubscription(id: string): Promise<void> {
   await apiRequest<{ status: "ok" }>(`${basePath}/${id}/actions/refresh`, {
     method: "POST",

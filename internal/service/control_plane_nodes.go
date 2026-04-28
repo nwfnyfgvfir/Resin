@@ -1,6 +1,8 @@
 package service
 
 import (
+	"encoding/json"
+	"strconv"
 	"strings"
 	"time"
 
@@ -8,6 +10,15 @@ import (
 	"github.com/Resinat/Resin/internal/probe"
 	"github.com/Resinat/Resin/internal/subscription"
 )
+
+// NodeExportFile is the portable export payload for selected nodes.
+type NodeExportFile struct {
+	Version    int               `json:"version"`
+	ExportedAt string            `json:"exported_at"`
+	Nodes      []json.RawMessage `json:"nodes"`
+}
+
+const nodeExportVersion = 1
 
 // ------------------------------------------------------------------
 // Nodes
@@ -217,6 +228,30 @@ func (s *ControlPlaneService) GetNode(hashStr string) (*NodeSummary, error) {
 	}
 	ns := s.nodeEntryToSummary(h, entry)
 	return &ns, nil
+}
+
+// ExportNodes exports selected nodes using their raw node options.
+func (s *ControlPlaneService) ExportNodes(hashStrs []string) (*NodeExportFile, error) {
+	if len(hashStrs) == 0 {
+		return nil, invalidArg("node_hashes: must contain at least one node hash")
+	}
+	items := make([]json.RawMessage, 0, len(hashStrs))
+	for i, hashStr := range hashStrs {
+		h, err := node.ParseHex(hashStr)
+		if err != nil {
+			return nil, invalidArg("node_hashes[" + strconv.Itoa(i) + "]: invalid format")
+		}
+		entry, ok := s.Pool.GetEntry(h)
+		if !ok {
+			return nil, notFound("node_hashes[" + strconv.Itoa(i) + "]: node not found")
+		}
+		items = append(items, append(json.RawMessage(nil), entry.RawOptions...))
+	}
+	return &NodeExportFile{
+		Version:    nodeExportVersion,
+		ExportedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		Nodes:      items,
+	}, nil
 }
 
 // ProbeEgress triggers a synchronous egress probe and returns results.

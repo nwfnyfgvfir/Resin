@@ -154,6 +154,12 @@ The admin panel now shows the active database type so you can verify whether the
 3. Go to **Subscriptions** in the left menu and add your node subscription.
 4. Wait briefly for the node pool to refresh.
 
+> [!NOTE]
+> Related Web UI actions:
+> - The **Subscriptions** page supports selecting multiple subscriptions and deleting them in one action.
+> - Subscription backups can be exported, and importing a backup **appends** its subscriptions to the current list instead of deleting existing ones.
+> - The **Node Pool** page lets you select one or more nodes and export the selected raw node configs as a JSON file.
+
 ### Step 3: Start sending proxy requests
 
 Use one of the client access modes in the following sections.

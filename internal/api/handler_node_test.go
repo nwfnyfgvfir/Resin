@@ -215,6 +215,40 @@ func TestHandleListNodes_IncludesReferenceLatencyMs(t *testing.T) {
 	}
 }
 
+func TestHandleExportNodes_ReturnsSelectedRawOptions(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+
+	sub := subscription.NewSubscription("11111111-1111-1111-1111-111111111111", "sub-a", "https://example.com/a", true, false)
+	cp.SubMgr.Register(sub)
+
+	rawA := []byte(`{"type":"ss","server":"1.1.1.1","port":443}`)
+	rawB := []byte(`{"type":"trojan","server":"2.2.2.2","port":443}`)
+	hashA := node.HashFromRawOptions(rawA)
+	hashB := node.HashFromRawOptions(rawB)
+	cp.Pool.AddNodeFromSub(hashA, rawA, sub.ID)
+	cp.Pool.AddNodeFromSub(hashB, rawB, sub.ID)
+	sub.ManagedNodes().StoreNode(hashA, subscription.ManagedNode{Tags: []string{"tag-a"}})
+	sub.ManagedNodes().StoreNode(hashB, subscription.ManagedNode{Tags: []string{"tag-b"}})
+
+	rec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/nodes:export", map[string]any{
+		"node_hashes": []string{hashB.Hex(), hashA.Hex()},
+	}, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("export nodes status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Disposition"); got != `attachment; filename="resin-nodes-export.json"` {
+		t.Fatalf("content-disposition: got %q, want %q", got, `attachment; filename="resin-nodes-export.json"`)
+	}
+	body := decodeJSONMap(t, rec)
+	if body["version"] != float64(1) {
+		t.Fatalf("version: got %v, want 1", body["version"])
+	}
+	nodes, ok := body["nodes"].([]any)
+	if !ok || len(nodes) != 2 {
+		t.Fatalf("nodes type/len: got %T len=%d", body["nodes"], len(nodes))
+	}
+}
+
 func TestHandleProbeEgress_ReturnsRegion(t *testing.T) {
 	srv, cp, _ := newControlPlaneTestServer(t)
 

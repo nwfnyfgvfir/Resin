@@ -150,7 +150,7 @@ func (s *ControlPlaneService) ExportSubscriptions() (*SubscriptionBackupFile, er
 	}, nil
 }
 
-// ImportSubscriptions replaces current subscriptions with those from a backup document.
+// ImportSubscriptions appends subscriptions from a backup document.
 func (s *ControlPlaneService) ImportSubscriptions(doc SubscriptionBackupFile) (*SubscriptionBackupFile, error) {
 	if doc.Version != subscriptionBackupVersion {
 		return nil, invalidArg(fmt.Sprintf("version: must be %d", subscriptionBackupVersion))
@@ -168,15 +168,6 @@ func (s *ControlPlaneService) ImportSubscriptions(doc SubscriptionBackupFile) (*
 		requests = append(requests, req)
 	}
 
-	existing, err := s.ListSubscriptions(nil)
-	if err != nil {
-		return nil, err
-	}
-	oldIDs := make([]string, 0, len(existing))
-	for _, sub := range existing {
-		oldIDs = append(oldIDs, sub.ID)
-	}
-
 	created := make([]SubscriptionResponse, 0, len(requests))
 	for i, req := range requests {
 		createdSub, err := s.CreateSubscription(req)
@@ -190,12 +181,6 @@ func (s *ControlPlaneService) ImportSubscriptions(doc SubscriptionBackupFile) (*
 			return nil, err
 		}
 		created = append(created, *createdSub)
-	}
-
-	for _, id := range oldIDs {
-		if err := s.DeleteSubscription(id); err != nil {
-			return nil, err
-		}
 	}
 
 	items := make([]SubscriptionBackupItem, 0, len(created))
@@ -583,6 +568,19 @@ func (s *ControlPlaneService) DeleteSubscription(id string) error {
 	})
 
 	return deleteErr
+}
+
+// DeleteSubscriptions deletes multiple subscriptions.
+func (s *ControlPlaneService) DeleteSubscriptions(ids []string) error {
+	for i, id := range ids {
+		if err := s.DeleteSubscription(id); err != nil {
+			if svcErr, ok := err.(*ServiceError); ok {
+				return &ServiceError{Code: svcErr.Code, Message: fmt.Sprintf("subscription_ids[%d]: %s", i, svcErr.Message), Err: svcErr.Err}
+			}
+			return err
+		}
+	}
+	return nil
 }
 
 // RefreshSubscription triggers an immediate subscription refresh (blocks).

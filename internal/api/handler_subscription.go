@@ -2,10 +2,15 @@ package api
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/Resinat/Resin/internal/service"
 )
+
+type deleteSubscriptionsRequest struct {
+	SubscriptionIDs []string `json:"subscription_ids"`
+}
 
 func subscriptionMatchesKeyword(s service.SubscriptionResponse, keyword string) bool {
 	contains := func(v string) bool {
@@ -158,6 +163,32 @@ func HandleUpdateSubscription(cp *service.ControlPlaneService) http.HandlerFunc 
 			return
 		}
 		WriteJSON(w, http.StatusOK, s)
+	}
+}
+
+// HandleDeleteSubscriptions returns a handler for DELETE /api/v1/subscriptions.
+func HandleDeleteSubscriptions(cp *service.ControlPlaneService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req deleteSubscriptionsRequest
+		if err := DecodeBody(r, &req); err != nil {
+			writeDecodeBodyError(w, err)
+			return
+		}
+		if len(req.SubscriptionIDs) == 0 {
+			writeInvalidArgument(w, "subscription_ids: must contain at least one id")
+			return
+		}
+		for i, id := range req.SubscriptionIDs {
+			if !ValidateUUID(id) {
+				writeInvalidArgument(w, "subscription_ids["+strconv.Itoa(i)+"]: must be a valid UUID")
+				return
+			}
+		}
+		if err := cp.DeleteSubscriptions(req.SubscriptionIDs); err != nil {
+			writeServiceError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	}
 }
 

@@ -485,6 +485,41 @@ func TestListNodes_EnabledFilter(t *testing.T) {
 	}
 }
 
+func TestExportNodes_ReturnsSelectedRawOptions(t *testing.T) {
+	subMgr := topology.NewSubscriptionManager()
+	pool := newNodeListTestPool(subMgr)
+
+	sub := subscription.NewSubscription("sub-a", "sub-a", "https://example.com/a", true, false)
+	subMgr.Register(sub)
+
+	rawA := []byte(`{"type":"ss","server":"1.1.1.1","port":443}`)
+	rawB := []byte(`{"type":"trojan","server":"2.2.2.2","port":443}`)
+	hashA := addRoutableNodeForSubscription(t, pool, sub, rawA, "203.0.113.60")
+	hashB := addRoutableNodeForSubscription(t, pool, sub, rawB, "203.0.113.61")
+
+	cp := &ControlPlaneService{
+		Pool:   pool,
+		SubMgr: subMgr,
+	}
+
+	doc, err := cp.ExportNodes([]string{hashB.Hex(), hashA.Hex()})
+	if err != nil {
+		t.Fatalf("ExportNodes: %v", err)
+	}
+	if doc.Version != nodeExportVersion {
+		t.Fatalf("version = %d, want %d", doc.Version, nodeExportVersion)
+	}
+	if len(doc.Nodes) != 2 {
+		t.Fatalf("nodes len = %d, want 2", len(doc.Nodes))
+	}
+	if string(doc.Nodes[0]) != string(rawB) {
+		t.Fatalf("first raw node = %s, want %s", string(doc.Nodes[0]), string(rawB))
+	}
+	if string(doc.Nodes[1]) != string(rawA) {
+		t.Fatalf("second raw node = %s, want %s", string(doc.Nodes[1]), string(rawA))
+	}
+}
+
 func TestProbeEgress_ReturnsRegion(t *testing.T) {
 	subMgr := topology.NewSubscriptionManager()
 	pool := newNodeListTestPool(subMgr)

@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createColumnHelper } from "@tanstack/react-table";
-import { AlertTriangle, Eraser, Globe, RefreshCw, Sparkles, X, Zap } from "lucide-react";
+import { AlertTriangle, Download, Eraser, Globe, RefreshCw, Sparkles, X, Zap } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useLocation } from "react-router-dom";
 import { Badge } from "../../components/ui/Badge";
@@ -18,14 +18,16 @@ import { formatDateTime, formatRelativeTime } from "../../lib/time";
 import { listPlatforms } from "../platforms/api";
 import type { Platform } from "../platforms/types";
 import { listSubscriptions } from "../subscriptions/api";
-import { getNode, listNodes, probeEgress, probeLatency } from "./api";
-import type { NodeSummary } from "./types";
+import { exportNodes, getNode, listNodes, probeEgress, probeLatency } from "./api";
+import type { NodeExportFile, NodeSummary } from "./types";
 import { getAllRegions, getRegionName } from "./regions";
 import type { NodeListFilters, NodeSortBy, SortOrder } from "./types";
 
 type NodeStatusFilter = "all" | "healthy" | "circuit_open" | "error" | "disabled";
 type NodeDisplayStatus = "healthy" | "circuit_open" | "pending_test" | "error" | "disabled";
 type ProbeAction = "egress" | "latency";
+
+const NODE_EXPORT_FILENAME = "resin-nodes-export.json";
 
 type NodeFilterDraft = {
   platform_id: string;
@@ -260,6 +262,18 @@ function regionToFlag(region: string | undefined): string {
   return name ? `${flag} ${code} (${name})` : `${flag} ${code}`;
 }
 
+function downloadNodeExport(doc: NodeExportFile) {
+  const blob = new Blob([JSON.stringify(doc, null, 2)], { type: "application/json;charset=utf-8" });
+  const url = window.URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = NODE_EXPORT_FILENAME;
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  window.URL.revokeObjectURL(url);
+}
+
 export function NodesPage() {
   const { locale, t } = useI18n();
   const location = useLocation();
@@ -272,6 +286,7 @@ export function NodesPage() {
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState<number>(200);
   const [selectedNodeHash, setSelectedNodeHash] = useState("");
+  const [selectedNodeHashes, setSelectedNodeHashes] = useState<Set<string>>(() => new Set());
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [pendingEgressHashes, setPendingEgressHashes] = useState<Set<string>>(() => new Set());
   const [pendingLatencyHashes, setPendingLatencyHashes] = useState<Set<string>>(() => new Set());
@@ -334,6 +349,8 @@ export function NodesPage() {
   const nodes = nodesPage.items;
 
   const totalPages = Math.max(1, Math.ceil(nodesPage.total / pageSize));
+  const selectedNodeCount = selectedNodeHashes.size;
+  const allCurrentPageSelected = nodes.length > 0 && nodes.every((node) => selectedNodeHashes.has(node.node_hash));
 
   const selectedNode = useMemo(() => {
     if (!selectedNodeHash) {
@@ -382,6 +399,40 @@ export function NodesPage() {
     }
   };
 
+  const toggleNodeSelection = (nodeHash: string, checked: boolean) => {
+    setSelectedNodeHashes((prev) => {
+      const next = new Set(prev);
+      if (checked) {
+        next.add(nodeHash);
+      } else {
+        next.delete(nodeHash);
+      }
+      return next;
+    });
+  };
+
+  const toggleCurrentPageSelection = (checked: boolean) => {
+    setSelectedNodeHashes((prev) => {
+      const next = new Set(prev);
+      for (const node of nodes) {
+        if (checked) {
+          next.add(node.node_hash);
+        } else {
+          next.delete(node.node_hash);
+        }
+      }
+      return next;
+    });
+  };
+
+  const handleExportSelectedNodes = async () => {
+    const hashes = Array.from(selectedNodeHashes);
+    if (!hashes.length) {
+      return;
+    }
+    await exportNodesMutation.mutateAsync(hashes);
+  };
+
   const probeEgressMutation = useMutation({
     mutationFn: async (hash: string) => probeEgress(hash),
     onSuccess: async (result) => {
@@ -409,6 +460,17 @@ export function NodesPage() {
     },
     onError: async (error) => {
       await refreshNodes();
+      showToast("error", formatApiErrorMessage(error, t));
+    },
+  });
+
+  const exportNodesMutation = useMutation({
+    mutationFn: async (hashes: string[]) => exportNodes(hashes),
+    onSuccess: (doc) => {
+      downloadNodeExport(doc);
+      showToast("success", t("已导出 {{count}} 个节点", { count: doc.nodes.length }));
+    },
+    onError: (error) => {
       showToast("error", formatApiErrorMessage(error, t));
     },
   });
@@ -490,6 +552,7 @@ export function NodesPage() {
       const next = { ...prev, [key]: value };
       setActiveFilters(draftToActiveFilters(next));
       setSelectedNodeHash("");
+      setSelectedNodeHashes(new Set());
       setDrawerOpen(false);
       setPage(0);
       return next;
@@ -500,6 +563,7 @@ export function NodesPage() {
     setDraftFilters(defaultFilterDraft);
     setActiveFilters(draftToActiveFilters(defaultFilterDraft));
     setSelectedNodeHash("");
+    setSelectedNodeHashes(new Set());
     setDrawerOpen(false);
     setPage(0);
   };
@@ -522,6 +586,30 @@ export function NodesPage() {
   const col = createColumnHelper<NodeSummary>();
 
   const nodeColumns = [
+    col.display({
+      id: "select",
+      header: () => (
+        <input
+          type="checkbox"
+          aria-label={t("选择当前页全部节点")}
+          checked={allCurrentPageSelected}
+          onChange={(event) => toggleCurrentPageSelection(event.target.checked)}
+          onClick={(event) => event.stopPropagation()}
+        />
+      ),
+      cell: (info) => {
+        const node = info.row.original;
+        return (
+          <input
+            type="checkbox"
+            aria-label={t("选择节点 {{name}}", { name: firstTag(node) })}
+            checked={selectedNodeHashes.has(node.node_hash)}
+            onChange={(event) => toggleNodeSelection(node.node_hash, event.target.checked)}
+            onClick={(event) => event.stopPropagation()}
+          />
+        );
+      },
+    }),
     col.accessor((row) => firstTag(row), {
       id: "tag",
       header: () => (
@@ -790,6 +878,10 @@ export function NodesPage() {
             </div>
 
             <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.125rem", marginLeft: "auto" }}>
+              <Button size="sm" variant="secondary" onClick={() => void handleExportSelectedNodes()} disabled={!selectedNodeCount || exportNodesMutation.isPending} style={{ minHeight: "32px", height: "32px", padding: "0 0.75rem", display: "flex", alignItems: "center", gap: "0.25rem" }}>
+                <Download size={16} />
+                {selectedNodeCount ? t("导出选中（{{count}}）", { count: selectedNodeCount }) : t("导出节点")}
+              </Button>
               <Button size="sm" variant="secondary" onClick={refreshNodes} disabled={nodesQuery.isFetching} style={{ minHeight: "32px", height: "32px", padding: "0 0.75rem", display: "flex", alignItems: "center", gap: "0.25rem" }}>
                 <RefreshCw size={16} className={nodesQuery.isFetching ? "spin" : undefined} />
                 {t("刷新")}

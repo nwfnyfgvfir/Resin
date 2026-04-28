@@ -133,7 +133,7 @@ func TestExportSubscriptions_PortableBackupDocument(t *testing.T) {
 	}
 }
 
-func TestImportSubscriptions_ReplacesExistingSubscriptions(t *testing.T) {
+func TestImportSubscriptions_AppendsToExistingSubscriptions(t *testing.T) {
 	cp := newSubscriptionBackupTestService(t)
 
 	legacyName := "Legacy Feed"
@@ -183,16 +183,16 @@ func TestImportSubscriptions_ReplacesExistingSubscriptions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListSubscriptions: %v", err)
 	}
-	if len(runtimeSubs) != 2 {
-		t.Fatalf("runtime subscriptions len = %d, want 2", len(runtimeSubs))
+	if len(runtimeSubs) != 3 {
+		t.Fatalf("runtime subscriptions len = %d, want 3", len(runtimeSubs))
 	}
 
 	persistedSubs, err := cp.Engine.ListSubscriptions()
 	if err != nil {
 		t.Fatalf("Engine.ListSubscriptions: %v", err)
 	}
-	if len(persistedSubs) != 2 {
-		t.Fatalf("persisted subscriptions len = %d, want 2", len(persistedSubs))
+	if len(persistedSubs) != 3 {
+		t.Fatalf("persisted subscriptions len = %d, want 3", len(persistedSubs))
 	}
 
 	runtimeByName := make(map[string]SubscriptionResponse, len(runtimeSubs))
@@ -200,19 +200,20 @@ func TestImportSubscriptions_ReplacesExistingSubscriptions(t *testing.T) {
 	for _, sub := range runtimeSubs {
 		runtimeByName[sub.Name] = sub
 		runtimeNames = append(runtimeNames, sub.Name)
-		if sub.ID == legacy.ID {
-			t.Fatalf("imported subscription reused legacy id %q", legacy.ID)
-		}
 	}
 	sort.Strings(runtimeNames)
-	if strings.Join(runtimeNames, ",") != "Alpha Feed,Beta Feed" {
-		t.Fatalf("runtime names = %q, want %q", strings.Join(runtimeNames, ","), "Alpha Feed,Beta Feed")
+	if strings.Join(runtimeNames, ",") != "Alpha Feed,Beta Feed,Legacy Feed" {
+		t.Fatalf("runtime names = %q, want %q", strings.Join(runtimeNames, ","), "Alpha Feed,Beta Feed,Legacy Feed")
 	}
-	if _, ok := runtimeByName[legacy.Name]; ok {
-		t.Fatalf("legacy subscription %q should be removed", legacy.Name)
+	legacyRuntime, ok := runtimeByName[legacy.Name]
+	if !ok {
+		t.Fatalf("legacy subscription %q should still exist", legacy.Name)
 	}
-	if cp.SubMgr.Lookup(legacy.ID) != nil {
-		t.Fatalf("legacy subscription id %q should be unregistered", legacy.ID)
+	if legacyRuntime.ID != legacy.ID {
+		t.Fatalf("legacy runtime id = %q, want %q", legacyRuntime.ID, legacy.ID)
+	}
+	if cp.SubMgr.Lookup(legacy.ID) == nil {
+		t.Fatalf("legacy subscription id %q should remain registered", legacy.ID)
 	}
 
 	alpha := runtimeByName["Alpha Feed"]
@@ -252,13 +253,10 @@ func TestImportSubscriptions_ReplacesExistingSubscriptions(t *testing.T) {
 	persistedNames := make([]string, 0, len(persistedSubs))
 	for _, sub := range persistedSubs {
 		persistedNames = append(persistedNames, sub.Name)
-		if sub.ID == legacy.ID {
-			t.Fatalf("persisted subscriptions still contain legacy id %q", legacy.ID)
-		}
 	}
 	sort.Strings(persistedNames)
-	if strings.Join(persistedNames, ",") != "Alpha Feed,Beta Feed" {
-		t.Fatalf("persisted names = %q, want %q", strings.Join(persistedNames, ","), "Alpha Feed,Beta Feed")
+	if strings.Join(persistedNames, ",") != "Alpha Feed,Beta Feed,Legacy Feed" {
+		t.Fatalf("persisted names = %q, want %q", strings.Join(persistedNames, ","), "Alpha Feed,Beta Feed,Legacy Feed")
 	}
 }
 

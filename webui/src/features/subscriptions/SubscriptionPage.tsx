@@ -24,6 +24,7 @@ import {
   cleanupSubscriptionCircuitOpenNodes,
   createSubscription,
   deleteSubscription,
+  deleteSubscriptions,
   exportSubscriptions,
   importSubscriptions,
   listSubscriptions,
@@ -149,6 +150,7 @@ export function SubscriptionPage() {
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState<number>(20);
   const [selectedSubscriptionId, setSelectedSubscriptionId] = useState("");
+  const [selectedSubscriptionIds, setSelectedSubscriptionIds] = useState<Set<string>>(() => new Set());
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [pendingRefreshIds, setPendingRefreshIds] = useState<Set<string>>(() => new Set());
@@ -188,6 +190,8 @@ export function SubscriptionPage() {
 
   const totalPages = Math.max(1, Math.ceil(totalSubscriptions / pageSize));
   const currentPage = Math.min(page, totalPages - 1);
+  const selectedCount = selectedSubscriptionIds.size;
+  const allCurrentPageSelected = subscriptions.length > 0 && subscriptions.every((subscription) => selectedSubscriptionIds.has(subscription.id));
 
   const selectedSubscription = useMemo(() => {
     if (!selectedSubscriptionId) {
@@ -266,6 +270,32 @@ export function SubscriptionPage() {
     ]);
   };
 
+  const toggleSubscriptionSelection = useCallback((subscriptionId: string, checked: boolean) => {
+    setSelectedSubscriptionIds((prev) => {
+      const next = new Set(prev);
+      if (checked) {
+        next.add(subscriptionId);
+      } else {
+        next.delete(subscriptionId);
+      }
+      return next;
+    });
+  }, []);
+
+  const toggleCurrentPageSelection = useCallback((checked: boolean) => {
+    setSelectedSubscriptionIds((prev) => {
+      const next = new Set(prev);
+      for (const subscription of subscriptions) {
+        if (checked) {
+          next.add(subscription.id);
+        } else {
+          next.delete(subscription.id);
+        }
+      }
+      return next;
+    });
+  }, [subscriptions]);
+
   const createMutation = useMutation({
     mutationFn: createSubscription,
     onSuccess: async (created) => {
@@ -323,6 +353,11 @@ export function SubscriptionPage() {
     },
     onSuccess: async (deleted) => {
       await invalidateSubscriptions();
+      setSelectedSubscriptionIds((prev) => {
+        const next = new Set(prev);
+        next.delete(deleted.id);
+        return next;
+      });
       if (selectedSubscriptionId === deleted.id) {
         setSelectedSubscriptionId("");
         setDrawerOpen(false);
@@ -334,7 +369,32 @@ export function SubscriptionPage() {
     },
   });
   const deleteSubscriptionMutateAsync = deleteMutation.mutateAsync;
-  const isDeletePending = deleteMutation.isPending;
+
+  const batchDeleteMutation = useMutation({
+    mutationFn: async (ids: string[]) => {
+      await deleteSubscriptions(ids);
+      return ids;
+    },
+    onSuccess: async (ids) => {
+      await invalidateSubscriptionsAndNodes();
+      setSelectedSubscriptionIds((prev) => {
+        const next = new Set(prev);
+        for (const id of ids) {
+          next.delete(id);
+        }
+        return next;
+      });
+      if (selectedSubscriptionId && ids.includes(selectedSubscriptionId)) {
+        setSelectedSubscriptionId("");
+        setDrawerOpen(false);
+      }
+      showToast("success", t("已删除 {{count}} 条订阅", { count: ids.length }));
+    },
+    onError: (error) => {
+      showToast("error", formatApiErrorMessage(error, t));
+    },
+  });
+  const isDeletePending = deleteMutation.isPending || batchDeleteMutation.isPending;
 
   const refreshMutation = useMutation({
     mutationFn: async (subscription: Subscription) => {
@@ -367,8 +427,9 @@ export function SubscriptionPage() {
     onSuccess: async (doc) => {
       await invalidateSubscriptionsAndNodes();
       setSelectedSubscriptionId("");
+      setSelectedSubscriptionIds(new Set());
       setDrawerOpen(false);
-      showToast("success", t("订阅备份已导入，共恢复 {{count}} 条订阅", { count: doc.subscriptions.length }));
+      showToast("success", t("订阅备份已导入，共追加 {{count}} 条订阅", { count: doc.subscriptions.length }));
     },
     onError: (error) => {
       showToast("error", formatApiErrorMessage(error, t));
@@ -451,6 +512,18 @@ export function SubscriptionPage() {
     await cleanupCircuitOpenNodesMutation.mutateAsync(subscription);
   };
 
+  const handleBatchDelete = useCallback(async () => {
+    const ids = Array.from(selectedSubscriptionIds);
+    if (!ids.length) {
+      return;
+    }
+    const confirmed = window.confirm(t("确认删除选中的 {{count}} 条订阅？关联节点会被清理。", { count: ids.length }));
+    if (!confirmed) {
+      return;
+    }
+    await batchDeleteMutation.mutateAsync(ids);
+  }, [batchDeleteMutation, selectedSubscriptionIds, t]);
+
   const handleExport = useCallback(async () => {
     await exportMutation.mutateAsync();
   }, [exportMutation]);
@@ -479,7 +552,7 @@ export function SubscriptionPage() {
       return;
     }
 
-    const confirmed = window.confirm(t("确认使用备份覆盖当前全部订阅？此操作会替换现有订阅。"));
+    const confirmed = window.confirm(t("确认导入备份中的 {{count}} 条订阅？现有订阅会保留，导入内容将追加到当前列表。", { count: parsed.subscriptions.length }));
     if (!confirmed) {
       return;
     }
@@ -514,6 +587,30 @@ export function SubscriptionPage() {
 
   const subColumns = useMemo(
     () => [
+      col.display({
+        id: "select",
+        header: () => (
+          <input
+            type="checkbox"
+            aria-label={t("选择当前页全部订阅")}
+            checked={allCurrentPageSelected}
+            onChange={(event) => toggleCurrentPageSelection(event.target.checked)}
+            onClick={(event) => event.stopPropagation()}
+          />
+        ),
+        cell: (info) => {
+          const subscription = info.row.original;
+          return (
+            <input
+              type="checkbox"
+              aria-label={t("选择订阅 {{name}}", { name: subscription.name })}
+              checked={selectedSubscriptionIds.has(subscription.id)}
+              onChange={(event) => toggleSubscriptionSelection(subscription.id, event.target.checked)}
+              onClick={(event) => event.stopPropagation()}
+            />
+          );
+        },
+      }),
       col.accessor("name", {
         header: t("名称"),
         cell: (info) => <p className="subscriptions-name-cell">{info.getValue()}</p>,
@@ -616,7 +713,7 @@ export function SubscriptionPage() {
         },
       }),
     ],
-    [col, handleDelete, handleRefresh, isDeletePending, isRefreshPending, openDrawer, t]
+    [allCurrentPageSelected, col, handleDelete, handleRefresh, isDeletePending, isRefreshPending, openDrawer, selectedSubscriptionIds, t, toggleCurrentPageSelection, toggleSubscriptionSelection]
   );
 
   return (
@@ -644,6 +741,7 @@ export function SubscriptionPage() {
                 value={enabledFilter}
                 onChange={(event) => {
                   setEnabledFilter(event.target.value as EnabledFilter);
+                  setSelectedSubscriptionIds(new Set());
                   setPage(0);
                 }}
               >
@@ -660,6 +758,7 @@ export function SubscriptionPage() {
                 value={search}
                 onChange={(event) => {
                   setSearch(event.target.value);
+                  setSelectedSubscriptionIds(new Set());
                   setPage(0);
                 }}
                 style={{ padding: "6px 10px", borderRadius: 8 }}
@@ -674,6 +773,15 @@ export function SubscriptionPage() {
                 void handleImportFileChange(event);
               }}
             />
+            <Button
+              variant="danger"
+              size="sm"
+              onClick={() => void handleBatchDelete()}
+              disabled={!selectedCount || isDeletePending}
+            >
+              <Trash2 size={16} />
+              {selectedCount ? t("删除选中（{{count}}）", { count: selectedCount }) : t("批量删除")}
+            </Button>
             <Button
               variant="secondary"
               size="sm"

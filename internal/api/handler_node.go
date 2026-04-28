@@ -11,6 +11,10 @@ import (
 	"github.com/Resinat/Resin/internal/service"
 )
 
+type exportNodesRequest struct {
+	NodeHashes []string `json:"node_hashes"`
+}
+
 func nodeTagSortKey(n service.NodeSummary) string {
 	if n.DisplayTag != "" {
 		return n.DisplayTag
@@ -183,6 +187,24 @@ func HandleGetNode(cp *service.ControlPlaneService) http.HandlerFunc {
 			return
 		}
 		WriteJSON(w, http.StatusOK, n)
+	}
+}
+
+// HandleExportNodes returns a handler for POST /api/v1/nodes:export.
+func HandleExportNodes(cp *service.ControlPlaneService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req exportNodesRequest
+		if err := DecodeBody(r, &req); err != nil {
+			writeDecodeBodyError(w, err)
+			return
+		}
+		doc, err := cp.ExportNodes(req.NodeHashes)
+		if err != nil {
+			writeServiceError(w, err)
+			return
+		}
+		w.Header().Set("Content-Disposition", "attachment; filename=\"resin-nodes-export.json\"")
+		WriteJSON(w, http.StatusOK, doc)
 	}
 }
 
