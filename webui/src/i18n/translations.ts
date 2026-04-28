@@ -35,7 +35,7 @@ const EXACT_ZH_TO_EN: Record<string, string> = {
   "节点池": "Node Pool",
   "导出节点": "Export Nodes",
   "导出选中（{{count}}）": "Export Selected ({{count}})",
-  "已导出 {{count}} 个节点": "Exported {{count}} nodes",
+  "已导出 {{count}} 个节点订阅链接": "Exported subscription links for {{count}} nodes",
   "选择当前页全部订阅": "Select all subscriptions on current page",
   "选择订阅 {{name}}": "Select subscription {{name}}",
   "选择当前页全部节点": "Select all nodes on current page",

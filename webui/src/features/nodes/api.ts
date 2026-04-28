@@ -1,8 +1,9 @@
-import { apiRequest } from "../../lib/api-client";
+import { ApiError, apiRequest } from "../../lib/api-client";
+import { getStoredAuthToken } from "../auth/auth-store";
 import type {
   EgressProbeResult,
   LatencyProbeResult,
-  NodeExportFile,
+  NodeExportText,
   NodeListQuery,
   NodeSummary,
   PageResponse,
@@ -110,9 +111,37 @@ export async function probeLatency(hash: string): Promise<LatencyProbeResult> {
   });
 }
 
-export async function exportNodes(nodeHashes: string[]): Promise<NodeExportFile> {
-  return apiRequest<NodeExportFile>(`${basePath}:export`, {
+export async function exportNodes(nodeHashes: string[]): Promise<NodeExportText> {
+  const headers = new Headers();
+  headers.set("Content-Type", "application/json; charset=utf-8");
+  const token = getStoredAuthToken();
+  if (token) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+
+  const response = await fetch(basePath + ":export", {
     method: "POST",
-    body: { node_hashes: nodeHashes },
+    headers,
+    body: JSON.stringify({ node_hashes: nodeHashes }),
   });
+
+  if (!response.ok) {
+    let body: { error?: { code?: string; message?: string } } | null = null;
+    const contentType = response.headers.get("content-type") ?? "";
+    if (contentType.includes("application/json")) {
+      try {
+        body = (await response.json()) as { error?: { code?: string; message?: string } };
+      } catch {
+        body = null;
+      }
+    }
+    throw new ApiError(
+      response.status,
+      body?.error?.code ?? "HTTP_ERROR",
+      body?.error?.message ?? response.statusText,
+      body
+    );
+  }
+
+  return response.text();
 }

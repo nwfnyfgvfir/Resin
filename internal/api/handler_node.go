@@ -198,13 +198,14 @@ func HandleExportNodes(cp *service.ControlPlaneService) http.HandlerFunc {
 			writeDecodeBodyError(w, err)
 			return
 		}
-		doc, err := cp.ExportNodes(req.NodeHashes)
+		content, err := cp.ExportNodes(req.NodeHashes)
 		if err != nil {
 			writeServiceError(w, err)
 			return
 		}
-		w.Header().Set("Content-Disposition", "attachment; filename=\"resin-nodes-export.json\"")
-		WriteJSON(w, http.StatusOK, doc)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Content-Disposition", "attachment; filename=\"resin-nodes-subscription.txt\"")
+		_, _ = w.Write([]byte(content))
 	}
 }
 

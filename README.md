@@ -158,7 +158,7 @@ The admin panel now shows the active database type so you can verify whether the
 > Related Web UI actions:
 > - The **Subscriptions** page supports selecting multiple subscriptions and deleting them in one action.
 > - Subscription backups can be exported, and importing a backup **appends** its subscriptions to the current list instead of deleting existing ones.
-> - The **Node Pool** page lets you select one or more nodes and export the selected raw node configs as a JSON file.
+> - The **Node Pool** page lets you select one or more nodes and export them as subscription-link text that can be imported directly by clients such as v2ray, v2rayN, and Clash Meta.
 
 ### Step 3: Start sending proxy requests
 

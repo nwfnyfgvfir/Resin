@@ -64,8 +64,4 @@ export type LatencyProbeResult = {
   latency_ewma_ms: number;
 };
 
-export type NodeExportFile = {
-  version: number;
-  exported_at: string;
-  nodes: Record<string, unknown>[];
-};
+export type NodeExportText = string;

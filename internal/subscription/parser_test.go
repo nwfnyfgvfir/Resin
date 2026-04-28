@@ -2648,6 +2648,32 @@ custom-ss = custom, 3.3.3.3, 8388, aes-256-gcm, custom-pass
 	}
 }
 
+func TestExportNodeAsURI_RoundTripCommonProtocols(t *testing.T) {
+	cases := []string{
+		`{"type":"vmess","tag":"vmess-node","server":"vmess.example.com","server_port":443,"uuid":"11111111-2222-3333-4444-555555555555","security":"auto","alter_id":0,"tls":{"enabled":true,"server_name":"vmess.example.com"},"transport":{"type":"ws","path":"/ws","headers":{"Host":"ws.example.com"}}}`,
+		`{"type":"vless","tag":"vless-node","server":"vless.example.com","server_port":443,"uuid":"11111111-2222-3333-4444-555555555556","flow":"xtls-rprx-vision","tls":{"enabled":true,"server_name":"vless.example.com","utls":{"enabled":true,"fingerprint":"chrome"}},"transport":{"type":"grpc","service_name":"grpc-svc"}}`,
+		`{"type":"trojan","tag":"trojan-node","server":"trojan.example.com","server_port":443,"password":"secret","tls":{"enabled":true,"server_name":"trojan.example.com","insecure":true},"transport":{"type":"httpupgrade","host":"up.example.com","path":"/upgrade"}}`,
+		`{"type":"shadowsocks","tag":"ss-node","server":"1.1.1.1","server_port":8388,"method":"aes-128-gcm","password":"pass","plugin":"v2ray-plugin","plugin_opts":"mode=websocket;host=ws.example.com;tls"}`,
+		`{"type":"hysteria2","tag":"hy2-node","server":"hy2.example.com","server_port":443,"password":"hy2-password","server_ports":["443","8443-9443"],"up_mbps":20,"down_mbps":80,"hop_interval":"10s","tls":{"enabled":true,"server_name":"hy2.example.com","insecure":true},"obfs":{"type":"salamander","password":"obfs-secret"}}`,
+		`{"type":"socks","tag":"socks-node","server":"5.6.7.8","server_port":1080,"username":"user","password":"pass"}`,
+		`{"type":"http","tag":"http-node","server":"8.8.8.8","server_port":8080,"username":"user","password":"pass"}`,
+	}
+
+	for _, raw := range cases {
+		uri, err := ExportNodeAsURI(json.RawMessage(raw))
+		if err != nil {
+			t.Fatalf("ExportNodeAsURI(%s): %v", raw, err)
+		}
+		nodes, err := ParseGeneralSubscription([]byte(uri))
+		if err != nil {
+			t.Fatalf("ParseGeneralSubscription(%s): %v", uri, err)
+		}
+		if len(nodes) != 1 {
+			t.Fatalf("ParseGeneralSubscription(%s) len = %d, want 1", uri, len(nodes))
+		}
+	}
+}
+
 func TestParseGeneralSubscription_UnknownFormatReturnsError(t *testing.T) {
 	_, err := ParseGeneralSubscription([]byte("this is not a subscription format"))
 	if err == nil {

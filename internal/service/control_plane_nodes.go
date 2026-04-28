@@ -1,7 +1,7 @@
 package service
 
 import (
-	"encoding/json"
+	"encoding/base64"
 	"strconv"
 	"strings"
 	"time"
@@ -11,14 +11,7 @@ import (
 	"github.com/Resinat/Resin/internal/subscription"
 )
 
-// NodeExportFile is the portable export payload for selected nodes.
-type NodeExportFile struct {
-	Version    int               `json:"version"`
-	ExportedAt string            `json:"exported_at"`
-	Nodes      []json.RawMessage `json:"nodes"`
-}
-
-const nodeExportVersion = 1
+const nodeExportFilename = "resin-nodes-subscription.txt"
 
 // ------------------------------------------------------------------
 // Nodes
@@ -230,28 +223,29 @@ func (s *ControlPlaneService) GetNode(hashStr string) (*NodeSummary, error) {
 	return &ns, nil
 }
 
-// ExportNodes exports selected nodes using their raw node options.
-func (s *ControlPlaneService) ExportNodes(hashStrs []string) (*NodeExportFile, error) {
+// ExportNodes exports selected nodes as a base64-wrapped URI subscription text.
+func (s *ControlPlaneService) ExportNodes(hashStrs []string) (string, error) {
 	if len(hashStrs) == 0 {
-		return nil, invalidArg("node_hashes: must contain at least one node hash")
+		return "", invalidArg("node_hashes: must contain at least one node hash")
 	}
-	items := make([]json.RawMessage, 0, len(hashStrs))
+	items := make([]string, 0, len(hashStrs))
 	for i, hashStr := range hashStrs {
 		h, err := node.ParseHex(hashStr)
 		if err != nil {
-			return nil, invalidArg("node_hashes[" + strconv.Itoa(i) + "]: invalid format")
+			return "", invalidArg("node_hashes[" + strconv.Itoa(i) + "]: invalid format")
 		}
 		entry, ok := s.Pool.GetEntry(h)
 		if !ok {
-			return nil, notFound("node_hashes[" + strconv.Itoa(i) + "]: node not found")
+			return "", notFound("node_hashes[" + strconv.Itoa(i) + "]: node not found")
 		}
-		items = append(items, append(json.RawMessage(nil), entry.RawOptions...))
+		uri, err := subscription.ExportNodeAsURI(entry.RawOptions)
+		if err != nil {
+			return "", invalidArg("node_hashes[" + strconv.Itoa(i) + "]: " + err.Error())
+		}
+		items = append(items, uri)
 	}
-	return &NodeExportFile{
-		Version:    nodeExportVersion,
-		ExportedAt: time.Now().UTC().Format(time.RFC3339Nano),
-		Nodes:      items,
-	}, nil
+	payload := strings.Join(items, "\n")
+	return base64.StdEncoding.EncodeToString([]byte(payload)), nil
 }
 
 // ProbeEgress triggers a synchronous egress probe and returns results.

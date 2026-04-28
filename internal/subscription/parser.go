@@ -4278,6 +4278,493 @@ func buildParsedNode(outbound map[string]any) (ParsedNode, bool) {
 	}, true
 }
 
+// ExportNodeAsURI converts a normalized outbound JSON node into a client-importable URI.
+func ExportNodeAsURI(raw json.RawMessage) (string, error) {
+	var outbound map[string]any
+	if err := json.Unmarshal(raw, &outbound); err != nil {
+		return "", fmt.Errorf("invalid outbound json: %w", err)
+	}
+	return exportOutboundAsURI(outbound)
+}
+
+func exportOutboundAsURI(outbound map[string]any) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(getString(outbound, "type"))) {
+	case "vmess":
+		return exportVMessOutboundURI(outbound)
+	case "vless":
+		return exportVLESSOutboundURI(outbound)
+	case "trojan":
+		return exportTrojanOutboundURI(outbound)
+	case "shadowsocks", "ss":
+		return exportShadowsocksOutboundURI(outbound)
+	case "hysteria2", "hy2":
+		return exportHysteria2OutboundURI(outbound)
+	case "socks":
+		return exportSocksOutboundURI(outbound)
+	case "http":
+		return exportHTTPOutboundURI(outbound)
+	default:
+		return "", fmt.Errorf("unsupported outbound type %q", strings.TrimSpace(getString(outbound, "type")))
+	}
+}
+
+func exportVMessOutboundURI(outbound map[string]any) (string, error) {
+	server, port, err := exportNodeEndpoint(outbound)
+	if err != nil {
+		return "", err
+	}
+	uuid := strings.TrimSpace(getString(outbound, "uuid"))
+	if uuid == "" {
+		return "", fmt.Errorf("vmess outbound missing uuid")
+	}
+	tag := exportNodeTag(outbound, "vmess", server, port)
+	payload := map[string]any{
+		"v":    "2",
+		"ps":   tag,
+		"add":  server,
+		"port": strconv.FormatUint(port, 10),
+		"id":   uuid,
+		"aid":  "0",
+		"scy":  firstNonEmpty(strings.TrimSpace(getString(outbound, "security")), "auto"),
+		"type": "none",
+	}
+	if alterID, ok := getUint(outbound, "alter_id"); ok {
+		payload["aid"] = strconv.FormatUint(alterID, 10)
+	}
+	transportType, transport, err := exportTransportSettings(outbound)
+	if err != nil {
+		return "", err
+	}
+	if transportType == "" {
+		payload["net"] = "tcp"
+	} else {
+		payload["net"] = transportType
+	}
+	if path := exportTransportPath(transport); path != "" {
+		payload["path"] = path
+	}
+	if host := exportTransportHost(transport); host != "" {
+		payload["host"] = host
+	}
+	if serviceName := exportTransportServiceName(transport); serviceName != "" {
+		payload["serviceName"] = serviceName
+	}
+	if tls, ok := exportTLSConfig(outbound); ok {
+		payload["tls"] = "tls"
+		if sni := strings.TrimSpace(getString(tls, "server_name")); sni != "" {
+			payload["sni"] = sni
+		}
+		if insecure, ok := getBool(tls, "insecure"); ok && insecure {
+			payload["allowInsecure"] = true
+		}
+		if alpn := exportTLSALPN(tls); alpn != "" {
+			payload["alpn"] = alpn
+		}
+		if fingerprint := exportTLSFingerprint(tls); fingerprint != "" {
+			payload["fp"] = fingerprint
+		}
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("marshal vmess payload: %w", err)
+	}
+	return "vmess://" + base64.StdEncoding.EncodeToString(raw), nil
+}
+
+func exportVLESSOutboundURI(outbound map[string]any) (string, error) {
+	server, port, err := exportNodeEndpoint(outbound)
+	if err != nil {
+		return "", err
+	}
+	uuid := strings.TrimSpace(getString(outbound, "uuid"))
+	if uuid == "" {
+		return "", fmt.Errorf("vless outbound missing uuid")
+	}
+	tag := exportNodeTag(outbound, "vless", server, port)
+	query := url.Values{}
+	query.Set("encryption", "none")
+	if flow := strings.TrimSpace(getString(outbound, "flow")); flow != "" {
+		query.Set("flow", flow)
+	}
+	transportType, transport, err := exportTransportSettings(outbound)
+	if err != nil {
+		return "", err
+	}
+	if transportType != "" {
+		query.Set("type", transportType)
+	}
+	security := "none"
+	if tls, ok := exportTLSConfig(outbound); ok {
+		if reality, ok := getMap(tls, "reality"); ok && len(reality) > 0 {
+			security = "reality"
+			if publicKey := strings.TrimSpace(getString(reality, "public_key")); publicKey != "" {
+				query.Set("pbk", publicKey)
+			}
+			if shortID := strings.TrimSpace(getString(reality, "short_id")); shortID != "" {
+				query.Set("sid", shortID)
+			}
+		} else {
+			security = "tls"
+		}
+		if sni := strings.TrimSpace(getString(tls, "server_name")); sni != "" {
+			query.Set("sni", sni)
+		}
+		if insecure, ok := getBool(tls, "insecure"); ok && insecure {
+			query.Set("allowInsecure", "1")
+		}
+		if alpn := exportTLSALPN(tls); alpn != "" {
+			query.Set("alpn", alpn)
+		}
+		if fingerprint := exportTLSFingerprint(tls); fingerprint != "" {
+			query.Set("fp", fingerprint)
+		}
+	}
+	query.Set("security", security)
+	if path := exportTransportPath(transport); path != "" {
+		query.Set("path", path)
+	}
+	if host := exportTransportHost(transport); host != "" {
+		query.Set("host", host)
+	}
+	if serviceName := exportTransportServiceName(transport); serviceName != "" {
+		query.Set("serviceName", serviceName)
+	}
+	u := &url.URL{
+		Scheme:   "vless",
+		User:     url.User(uuid),
+		Host:     exportHostPort(server, port),
+		RawQuery: query.Encode(),
+		Fragment: tag,
+	}
+	return u.String(), nil
+}
+
+func exportTrojanOutboundURI(outbound map[string]any) (string, error) {
+	server, port, err := exportNodeEndpoint(outbound)
+	if err != nil {
+		return "", err
+	}
+	password := strings.TrimSpace(getString(outbound, "password"))
+	if password == "" {
+		return "", fmt.Errorf("trojan outbound missing password")
+	}
+	tag := exportNodeTag(outbound, "trojan", server, port)
+	query := url.Values{}
+	transportType, transport, err := exportTransportSettings(outbound)
+	if err != nil {
+		return "", err
+	}
+	if transportType != "" {
+		query.Set("type", transportType)
+	}
+	if tls, ok := exportTLSConfig(outbound); ok {
+		if sni := strings.TrimSpace(getString(tls, "server_name")); sni != "" {
+			query.Set("sni", sni)
+		}
+		if insecure, ok := getBool(tls, "insecure"); ok && insecure {
+			query.Set("allowInsecure", "1")
+		}
+		if alpn := exportTLSALPN(tls); alpn != "" {
+			query.Set("alpn", alpn)
+		}
+		if fingerprint := exportTLSFingerprint(tls); fingerprint != "" {
+			query.Set("fp", fingerprint)
+		}
+	}
+	if path := exportTransportPath(transport); path != "" {
+		query.Set("path", path)
+	}
+	if host := exportTransportHost(transport); host != "" {
+		query.Set("host", host)
+	}
+	if serviceName := exportTransportServiceName(transport); serviceName != "" {
+		query.Set("serviceName", serviceName)
+	}
+	u := &url.URL{
+		Scheme:   "trojan",
+		User:     url.User(password),
+		Host:     exportHostPort(server, port),
+		RawQuery: query.Encode(),
+		Fragment: tag,
+	}
+	return u.String(), nil
+}
+
+func exportShadowsocksOutboundURI(outbound map[string]any) (string, error) {
+	server, port, err := exportNodeEndpoint(outbound)
+	if err != nil {
+		return "", err
+	}
+	method := strings.TrimSpace(getString(outbound, "method"))
+	password := strings.TrimSpace(getString(outbound, "password"))
+	if method == "" || password == "" {
+		return "", fmt.Errorf("shadowsocks outbound missing method or password")
+	}
+	tag := exportNodeTag(outbound, "shadowsocks", server, port)
+	secret := base64.RawURLEncoding.EncodeToString([]byte(method + ":" + password))
+	uri := "ss://" + secret + "@" + exportHostPort(server, port)
+	plugin := strings.TrimSpace(getString(outbound, "plugin"))
+	pluginOpts := strings.TrimSpace(getString(outbound, "plugin_opts"))
+	if pluginOpts != "" && plugin == "" {
+		return "", fmt.Errorf("shadowsocks outbound missing plugin name")
+	}
+	if plugin != "" {
+		query := url.Values{}
+		pluginSpec := plugin
+		if pluginOpts != "" {
+			pluginSpec += ";" + pluginOpts
+		}
+		query.Set("plugin", pluginSpec)
+		uri += "?" + query.Encode()
+	}
+	return uri + exportURIFragment(tag), nil
+}
+
+func exportHysteria2OutboundURI(outbound map[string]any) (string, error) {
+	server, port, err := exportNodeEndpoint(outbound)
+	if err != nil {
+		return "", err
+	}
+	password := strings.TrimSpace(getString(outbound, "password"))
+	if password == "" {
+		return "", fmt.Errorf("hysteria2 outbound missing password")
+	}
+	tag := exportNodeTag(outbound, "hysteria2", server, port)
+	query := url.Values{}
+	query.Set("password", password)
+	if ports := getStringList(outbound, "server_ports"); len(ports) > 0 {
+		query.Set("ports", strings.Join(ports, ","))
+	}
+	if upMbps, ok := getUint(outbound, "up_mbps"); ok {
+		query.Set("up", strconv.FormatUint(upMbps, 10))
+	}
+	if downMbps, ok := getUint(outbound, "down_mbps"); ok {
+		query.Set("down", strconv.FormatUint(downMbps, 10))
+	}
+	if hopInterval := strings.TrimSpace(getString(outbound, "hop_interval")); hopInterval != "" {
+		query.Set("hop-interval", hopInterval)
+	}
+	if tls, ok := exportTLSConfig(outbound); ok {
+		if sni := strings.TrimSpace(getString(tls, "server_name")); sni != "" {
+			query.Set("sni", sni)
+		}
+		if insecure, ok := getBool(tls, "insecure"); ok && insecure {
+			query.Set("insecure", "1")
+		}
+		if alpn := exportTLSALPN(tls); alpn != "" {
+			query.Set("alpn", alpn)
+		}
+		if fingerprint := exportTLSFingerprint(tls); fingerprint != "" {
+			query.Set("fp", fingerprint)
+		}
+		if pins := getStringList(tls, "certificate_public_key_sha256"); len(pins) > 0 {
+			query.Set("pinSHA256", strings.Join(pins, ","))
+		}
+		if certificatePath := strings.TrimSpace(getString(tls, "certificate_path")); certificatePath != "" {
+			query.Set("ca", certificatePath)
+		}
+		if certificates := getStringList(tls, "certificate"); len(certificates) > 0 {
+			query.Set("ca-str", certificates[0])
+		}
+	}
+	if obfs, ok := getMap(outbound, "obfs"); ok {
+		if obfsType := strings.TrimSpace(getString(obfs, "type")); obfsType != "" {
+			query.Set("obfs", obfsType)
+		}
+		if obfsPassword := strings.TrimSpace(getString(obfs, "password")); obfsPassword != "" {
+			query.Set("obfs-password", obfsPassword)
+		}
+	}
+	u := &url.URL{
+		Scheme:   "hy2",
+		Host:     exportHostPort(server, port),
+		RawQuery: query.Encode(),
+		Fragment: tag,
+	}
+	return u.String(), nil
+}
+
+func exportSocksOutboundURI(outbound map[string]any) (string, error) {
+	server, port, err := exportNodeEndpoint(outbound)
+	if err != nil {
+		return "", err
+	}
+	tag := exportNodeTag(outbound, "socks", server, port)
+	u := &url.URL{
+		Scheme:   "socks5",
+		Host:     exportHostPort(server, port),
+		Fragment: tag,
+	}
+	username := strings.TrimSpace(getString(outbound, "username"))
+	password := getString(outbound, "password")
+	if username != "" {
+		if password != "" {
+			u.User = url.UserPassword(username, password)
+		} else {
+			u.User = url.User(username)
+		}
+	}
+	return u.String(), nil
+}
+
+func exportHTTPOutboundURI(outbound map[string]any) (string, error) {
+	server, port, err := exportNodeEndpoint(outbound)
+	if err != nil {
+		return "", err
+	}
+	tag := exportNodeTag(outbound, "http", server, port)
+	scheme := "http"
+	query := url.Values{}
+	if tls, ok := exportTLSConfig(outbound); ok {
+		scheme = "https"
+		if sni := strings.TrimSpace(getString(tls, "server_name")); sni != "" && sni != server {
+			query.Set("sni", sni)
+		}
+		if insecure, ok := getBool(tls, "insecure"); ok && insecure {
+			query.Set("allowInsecure", "1")
+		}
+	}
+	u := &url.URL{
+		Scheme:   scheme,
+		Host:     exportHostPort(server, port),
+		RawQuery: query.Encode(),
+		Fragment: tag,
+	}
+	username := strings.TrimSpace(getString(outbound, "username"))
+	password := getString(outbound, "password")
+	if username != "" {
+		if password != "" {
+			u.User = url.UserPassword(username, password)
+		} else {
+			u.User = url.User(username)
+		}
+	}
+	return u.String(), nil
+}
+
+func exportNodeEndpoint(outbound map[string]any) (string, uint64, error) {
+	server := strings.TrimSpace(getString(outbound, "server"))
+	port, ok := getUint(outbound, "server_port", "port")
+	if server == "" || !ok || port == 0 {
+		return "", 0, fmt.Errorf("outbound missing server or port")
+	}
+	return server, port, nil
+}
+
+func exportNodeTag(outbound map[string]any, proto string, server string, port uint64) string {
+	return defaultTag(strings.TrimSpace(getString(outbound, "tag")), proto, server, port)
+}
+
+func exportHostPort(server string, port uint64) string {
+	return net.JoinHostPort(server, strconv.FormatUint(port, 10))
+}
+
+func exportURIFragment(tag string) string {
+	if strings.TrimSpace(tag) == "" {
+		return ""
+	}
+	return "#" + url.QueryEscape(tag)
+}
+
+func exportTransportSettings(outbound map[string]any) (string, map[string]any, error) {
+	transport, ok := getMap(outbound, "transport")
+	if !ok || len(transport) == 0 {
+		return "", nil, nil
+	}
+	switch strings.ToLower(strings.TrimSpace(getString(transport, "type"))) {
+	case "", "tcp":
+		return "", transport, nil
+	case "ws":
+		return "ws", transport, nil
+	case "grpc":
+		return "grpc", transport, nil
+	case "http", "h2":
+		return "h2", transport, nil
+	case "quic":
+		return "quic", transport, nil
+	case "httpupgrade", "http-upgrade":
+		return "httpupgrade", transport, nil
+	default:
+		return "", nil, fmt.Errorf("unsupported transport type %q", strings.TrimSpace(getString(transport, "type")))
+	}
+}
+
+func exportTransportPath(transport map[string]any) string {
+	if transport == nil {
+		return ""
+	}
+	path := strings.TrimSpace(getString(transport, "path"))
+	maxEarlyData, ok := getUint(transport, "max_early_data")
+	if !ok || maxEarlyData == 0 {
+		return path
+	}
+	if path == "" {
+		path = "/"
+	}
+	if strings.Contains(path, "?") {
+		return path
+	}
+	query := url.Values{}
+	query.Set("ed", strconv.FormatUint(maxEarlyData, 10))
+	headerName := strings.TrimSpace(getString(transport, "early_data_header_name"))
+	if headerName != "" && !strings.EqualFold(headerName, "Sec-WebSocket-Protocol") {
+		query.Set("eh", headerName)
+	}
+	return path + "?" + query.Encode()
+}
+
+func exportTransportHost(transport map[string]any) string {
+	if transport == nil {
+		return ""
+	}
+	if headers, ok := getMap(transport, "headers"); ok {
+		if host := strings.TrimSpace(firstNonEmptyValue(firstNonNil(headers["Host"], headers["host"]))); host != "" {
+			return host
+		}
+	}
+	if hosts := getStringList(transport, "host"); len(hosts) > 0 {
+		return strings.Join(hosts, ",")
+	}
+	return strings.TrimSpace(getString(transport, "host"))
+}
+
+func exportTransportServiceName(transport map[string]any) string {
+	if transport == nil {
+		return ""
+	}
+	return strings.TrimSpace(firstNonEmpty(
+		getString(transport, "service_name"),
+		getString(transport, "serviceName"),
+	))
+}
+
+func exportTLSConfig(outbound map[string]any) (map[string]any, bool) {
+	tls, ok := getMap(outbound, "tls")
+	if !ok || len(tls) == 0 {
+		return nil, false
+	}
+	if enabled, ok := getBool(tls, "enabled"); ok && !enabled {
+		return nil, false
+	}
+	return tls, true
+}
+
+func exportTLSALPN(tls map[string]any) string {
+	values := getStringSlice(tls, "alpn")
+	if len(values) == 0 {
+		return ""
+	}
+	return strings.Join(values, ",")
+}
+
+func exportTLSFingerprint(tls map[string]any) string {
+	utls, ok := getMap(tls, "utls")
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(getString(utls, "fingerprint"))
+}
+
 func normalizeInput(data []byte) []byte {
 	trimmed := bytes.TrimSpace(data)
 	return bytes.TrimPrefix(trimmed, []byte{0xEF, 0xBB, 0xBF})

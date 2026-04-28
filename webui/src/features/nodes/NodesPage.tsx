@@ -19,7 +19,7 @@ import { listPlatforms } from "../platforms/api";
 import type { Platform } from "../platforms/types";
 import { listSubscriptions } from "../subscriptions/api";
 import { exportNodes, getNode, listNodes, probeEgress, probeLatency } from "./api";
-import type { NodeExportFile, NodeSummary } from "./types";
+import type { NodeExportText, NodeSummary } from "./types";
 import { getAllRegions, getRegionName } from "./regions";
 import type { NodeListFilters, NodeSortBy, SortOrder } from "./types";
 
@@ -27,7 +27,7 @@ type NodeStatusFilter = "all" | "healthy" | "circuit_open" | "error" | "disabled
 type NodeDisplayStatus = "healthy" | "circuit_open" | "pending_test" | "error" | "disabled";
 type ProbeAction = "egress" | "latency";
 
-const NODE_EXPORT_FILENAME = "resin-nodes-export.json";
+const NODE_EXPORT_FILENAME = "resin-nodes-subscription.txt";
 
 type NodeFilterDraft = {
   platform_id: string;
@@ -262,8 +262,8 @@ function regionToFlag(region: string | undefined): string {
   return name ? `${flag} ${code} (${name})` : `${flag} ${code}`;
 }
 
-function downloadNodeExport(doc: NodeExportFile) {
-  const blob = new Blob([JSON.stringify(doc, null, 2)], { type: "application/json;charset=utf-8" });
+function downloadNodeExport(content: NodeExportText) {
+  const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
   const url = window.URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
@@ -465,10 +465,13 @@ export function NodesPage() {
   });
 
   const exportNodesMutation = useMutation({
-    mutationFn: async (hashes: string[]) => exportNodes(hashes),
-    onSuccess: (doc) => {
-      downloadNodeExport(doc);
-      showToast("success", t("已导出 {{count}} 个节点", { count: doc.nodes.length }));
+    mutationFn: async (hashes: string[]) => ({
+      content: await exportNodes(hashes),
+      count: hashes.length,
+    }),
+    onSuccess: ({ content, count }) => {
+      downloadNodeExport(content);
+      showToast("success", t("已导出 {{count}} 个节点订阅链接", { count }));
     },
     onError: (error) => {
       showToast("error", formatApiErrorMessage(error, t));
