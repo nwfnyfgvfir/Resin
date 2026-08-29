@@ -76,7 +76,7 @@ const EMPTY_SUBSCRIPTIONS: Subscription[] = [];
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100] as const;
 const LOCAL_SOURCE_UPDATE_INTERVAL = "12h";
 const SUBSCRIPTION_DISABLE_HINT = "禁用订阅后，相关节点不会参与平台路由、健康统计或自动探测。";
-const SUBSCRIPTION_EPHEMERAL_HINT = "临时订阅的非健康节点会在一段时间后被自动删除。订阅本身不会被删除。";
+const SUBSCRIPTION_EPHEMERAL_HINT = "临时订阅的非健康节点会在一段时间后被自动删除。若开启了“节点全部删除后自动删除订阅”，节点全部删完后订阅本身也会被删除。";
 const SUBSCRIPTION_BACKUP_FILENAME = "resin-subscriptions-backup.json";
 
 function extractHostname(url: string): string {

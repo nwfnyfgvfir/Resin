@@ -31,6 +31,9 @@ type RuntimeConfigForm = {
   latency_decay_window: string;
   cache_flush_interval: string;
   cache_flush_dirty_threshold: string;
+  auto_remove_unhealthy_nodes_enabled: boolean;
+  auto_remove_unhealthy_nodes_delay: string;
+  auto_delete_empty_subscriptions_enabled: boolean;
 };
 
 const EDITABLE_FIELDS: Array<keyof RuntimeConfig> = [
@@ -50,6 +53,9 @@ const EDITABLE_FIELDS: Array<keyof RuntimeConfig> = [
   "latency_decay_window",
   "cache_flush_interval",
   "cache_flush_dirty_threshold",
+  "auto_remove_unhealthy_nodes_enabled",
+  "auto_remove_unhealthy_nodes_delay",
+  "auto_delete_empty_subscriptions_enabled",
 ];
 
 const FIELD_LABELS: Record<keyof RuntimeConfig, string> = {
@@ -69,6 +75,9 @@ const FIELD_LABELS: Record<keyof RuntimeConfig, string> = {
   latency_decay_window: "历史延迟衰减窗口",
   cache_flush_interval: "缓存异步刷盘间隔",
   cache_flush_dirty_threshold: "缓存刷盘脏阈值",
+  auto_remove_unhealthy_nodes_enabled: "自动删除不可用节点",
+  auto_remove_unhealthy_nodes_delay: "不可用节点删除延迟",
+  auto_delete_empty_subscriptions_enabled: "节点全部删除后自动删除订阅",
 };
 
 const ALLOCATION_POLICY_LABELS: Record<string, string> = {
@@ -111,6 +120,9 @@ function configToForm(config: RuntimeConfig): RuntimeConfigForm {
     latency_decay_window: config.latency_decay_window,
     cache_flush_interval: config.cache_flush_interval,
     cache_flush_dirty_threshold: String(config.cache_flush_dirty_threshold),
+    auto_remove_unhealthy_nodes_enabled: config.auto_remove_unhealthy_nodes_enabled,
+    auto_remove_unhealthy_nodes_delay: config.auto_remove_unhealthy_nodes_delay,
+    auto_delete_empty_subscriptions_enabled: config.auto_delete_empty_subscriptions_enabled,
   };
 }
 
@@ -190,6 +202,9 @@ function parseForm(form: RuntimeConfigForm): RuntimeConfig {
     latency_decay_window: parseDurationField("历史延迟衰减窗口", form.latency_decay_window),
     cache_flush_interval: parseDurationField("缓存异步刷盘间隔", form.cache_flush_interval),
     cache_flush_dirty_threshold: parseNonNegativeInt("缓存刷盘脏阈值", form.cache_flush_dirty_threshold),
+    auto_remove_unhealthy_nodes_enabled: form.auto_remove_unhealthy_nodes_enabled,
+    auto_remove_unhealthy_nodes_delay: parseDurationField("不可用节点删除延迟", form.auto_remove_unhealthy_nodes_delay),
+    auto_delete_empty_subscriptions_enabled: form.auto_delete_empty_subscriptions_enabled,
   };
 }
 
@@ -486,6 +501,48 @@ export function SystemConfigPage() {
                     />
                   </div>
                 </div>
+                <div className="syscfg-checkbox-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px", marginTop: "16px" }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", background: "var(--surface-sunken, rgba(0,0,0,0.02))", padding: "12px 16px", borderRadius: "8px", border: "1px solid var(--border)" }}>
+                    <div style={{ display: "flex", alignItems: "center" }}>
+                      <span className="field-label" style={{ margin: 0, fontWeight: 500 }}>{t("自动删除不可用节点")}</span>
+                      {renderRestoreButton("auto_remove_unhealthy_nodes_enabled")}
+                    </div>
+                    <Switch
+                      checked={form.auto_remove_unhealthy_nodes_enabled}
+                      onChange={(event) => setFormField("auto_remove_unhealthy_nodes_enabled", event.target.checked)}
+                    />
+                  </div>
+                  <div className="field-group">
+                    <div style={{ display: "flex", alignItems: "center" }}>
+                      <label className="field-label" htmlFor="sys-auto-remove-delay" style={{ margin: 0 }}>
+                        {t("不可用节点删除延迟")}
+                      </label>
+                      {renderRestoreButton("auto_remove_unhealthy_nodes_delay")}
+                    </div>
+                    <Input
+                      id="sys-auto-remove-delay"
+                      value={form.auto_remove_unhealthy_nodes_delay}
+                      onChange={(event) => setFormField("auto_remove_unhealthy_nodes_delay", event.target.value)}
+                      disabled={!form.auto_remove_unhealthy_nodes_enabled}
+                    />
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", background: "var(--surface-sunken, rgba(0,0,0,0.02))", padding: "12px 16px", borderRadius: "8px", border: "1px solid var(--border)" }}>
+                    <div style={{ display: "flex", alignItems: "center" }}>
+                      <span className="field-label" style={{ margin: 0, fontWeight: 500 }}>{t("节点全部删除后自动删除订阅")}</span>
+                      {renderRestoreButton("auto_delete_empty_subscriptions_enabled")}
+                    </div>
+                    <Switch
+                      checked={form.auto_delete_empty_subscriptions_enabled}
+                      onChange={(event) => setFormField("auto_delete_empty_subscriptions_enabled", event.target.checked)}
+                    />
+                  </div>
+                </div>
+                <p className="field-hint" style={{ marginTop: "8px" }}>
+                  {t("启用后，所有非临时订阅中持续熔断或出站构建失败的节点会在延迟到期后被自动删除。临时订阅仍使用各自的驱逐延迟。")}
+                </p>
+                <p className="field-hint">
+                  {t("开启“节点全部删除后自动删除订阅”后，当订阅内所有节点都被自动删除时，订阅本身也会被一并删除。")}
+                </p>
               </section>
 
               <section className="syscfg-section">

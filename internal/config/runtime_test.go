@@ -105,6 +105,9 @@ func TestRuntimeConfig_JSONFieldNames(t *testing.T) {
 		"latency_decay_window",
 		"cache_flush_interval",
 		"cache_flush_dirty_threshold",
+		"auto_remove_unhealthy_nodes_enabled",
+		"auto_remove_unhealthy_nodes_delay",
+		"auto_delete_empty_subscriptions_enabled",
 	}
 
 	for _, key := range expectedKeys {

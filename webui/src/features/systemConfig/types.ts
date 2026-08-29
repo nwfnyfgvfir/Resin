@@ -15,6 +15,9 @@ export type RuntimeConfig = {
   latency_decay_window: string;
   cache_flush_interval: string;
   cache_flush_dirty_threshold: number;
+  auto_remove_unhealthy_nodes_enabled: boolean;
+  auto_remove_unhealthy_nodes_delay: string;
+  auto_delete_empty_subscriptions_enabled: boolean;
 };
 
 export type EnvConfig = {

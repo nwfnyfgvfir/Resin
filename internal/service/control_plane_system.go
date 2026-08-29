@@ -87,6 +87,9 @@ var runtimeConfigAllowedFields = map[string]bool{
 	"latency_decay_window":                     true,
 	"cache_flush_interval":                     true,
 	"cache_flush_dirty_threshold":              true,
+	"auto_remove_unhealthy_nodes_enabled":      true,
+	"auto_remove_unhealthy_nodes_delay":        true,
+	"auto_delete_empty_subscriptions_enabled":  true,
 }
 
 var platformPatchAllowedFields = map[string]bool{
@@ -234,6 +237,9 @@ func validateRuntimeConfig(cfg *config.RuntimeConfig) *ServiceError {
 	minCacheFlushInterval := 5 * time.Second
 	if time.Duration(cfg.CacheFlushInterval) < minCacheFlushInterval {
 		return invalidArg("cache_flush_interval: must be >= 5s")
+	}
+	if time.Duration(cfg.AutoRemoveUnhealthyNodesDelay) < 0 {
+		return invalidArg("auto_remove_unhealthy_nodes_delay: must be non-negative")
 	}
 
 	// LatencyTestURL domain must be in LatencyAuthorities.

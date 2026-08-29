@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"slices"
 	"strings"
 	"time"
@@ -525,49 +526,13 @@ func (s *ControlPlaneService) UpdateSubscription(id string, patchJSON json.RawMe
 
 // DeleteSubscription deletes a subscription and evicts its nodes.
 func (s *ControlPlaneService) DeleteSubscription(id string) error {
-	sub := s.SubMgr.Lookup(id)
-	if sub == nil {
-		return notFound("subscription not found")
+	if err := topology.DeleteSubscriptionRuntime(s.Engine, s.SubMgr, s.Pool, id); err != nil {
+		if errors.Is(err, state.ErrNotFound) {
+			return notFound("subscription not found")
+		}
+		return internal("delete subscription", err)
 	}
-
-	var (
-		managedHashes []node.Hash
-		deleteErr     error
-	)
-
-	// Keep delete atomic across persistence + in-memory runtime state:
-	// if DB delete fails, do not mutate runtime subscription/node state.
-	sub.WithOpLock(func() {
-		// Re-check under lock in case another goroutine removed it between
-		// the initial Lookup and lock acquisition.
-		lockedSub := s.SubMgr.Lookup(id)
-		if lockedSub == nil {
-			deleteErr = notFound("subscription not found")
-			return
-		}
-
-		lockedSub.ManagedNodes().RangeNodes(func(h node.Hash, _ subscription.ManagedNode) bool {
-			managedHashes = append(managedHashes, h)
-			return true
-		})
-
-		if err := s.Engine.DeleteSubscription(id); err != nil {
-			if errors.Is(err, state.ErrNotFound) {
-				deleteErr = notFound("subscription not found")
-			} else {
-				deleteErr = internal("delete subscription", err)
-			}
-			return
-		}
-
-		// Persist succeeded; now apply in-memory cleanup.
-		for _, h := range managedHashes {
-			s.Pool.RemoveNodeFromSub(h, id)
-		}
-		s.SubMgr.Unregister(id)
-	})
-
-	return deleteErr
+	return nil
 }
 
 // DeleteSubscriptions deletes multiple subscriptions.
@@ -644,7 +609,28 @@ func (s *ControlPlaneService) cleanupSubscriptionCircuitOpenNodesWithHook(
 		}
 	}
 
+	s.maybeDeleteEmptySubscriptionAfterCleanup(id)
+
 	return cleanedCount, nil
+}
+
+func (s *ControlPlaneService) maybeDeleteEmptySubscriptionAfterCleanup(id string) {
+	if s == nil || s.RuntimeCfg == nil || s.SubMgr == nil {
+		return
+	}
+	cfg := s.RuntimeCfg.Load()
+	if cfg == nil || !cfg.AutoDeleteEmptySubscriptionsEnabled {
+		return
+	}
+	sub := s.SubMgr.Lookup(id)
+	if sub == nil || !topology.SubscriptionHasNoActiveNodes(sub) {
+		return
+	}
+	if err := topology.DeleteSubscriptionRuntime(s.Engine, s.SubMgr, s.Pool, id); err != nil {
+		if !topology.IsSubscriptionNotFound(err) {
+			log.Printf("[subscription-cleanup] failed to delete empty subscription %s: %v", id, err)
+		}
+	}
 }
 
 func shouldCleanupSubscriptionNode(entry *node.NodeEntry) bool {

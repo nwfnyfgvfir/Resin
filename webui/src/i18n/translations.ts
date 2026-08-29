@@ -512,6 +512,13 @@ const EXACT_ZH_TO_EN: Record<string, string> = {
   "租约存活分位趋势": "Lease lifetime quantile trend",
   "租约时长": "Lease duration",
   "最大连续失败次数": "Max consecutive failures",
+  "自动删除不可用节点": "Auto-remove unavailable nodes",
+  "不可用节点删除延迟": "Unavailable node removal delay",
+  "节点全部删除后自动删除订阅": "Auto-delete subscription when all nodes removed",
+  "开启“节点全部删除后自动删除订阅”后，当订阅内所有节点都被自动删除时，订阅本身也会被一并删除。":
+    "When enabled, subscriptions are deleted automatically after all of their nodes have been auto-removed.",
+  "启用后，所有非临时订阅中持续熔断或出站构建失败的节点会在延迟到期后被自动删除。临时订阅仍使用各自的驱逐延迟。":
+    "When enabled, nodes that remain circuit-open or fail outbound construction in non-temporary subscriptions are auto-removed after the delay. Temporary subscriptions still use their own eviction delay.",
   "最大延迟表条目数": "Max latency table entries",
   "最近一次刷新无错误": "Last refresh had no errors",
   "GeoIP 更新计划": "GeoIP update schedule",
@@ -537,6 +544,8 @@ const EXACT_ZH_TO_EN: Record<string, string> = {
     "After disabling a subscription, related nodes will not participate in platform routing, health statistics, or automatic probing.",
   "临时订阅的非健康节点会在一段时间后被自动删除。订阅本身不会被删除。":
     "Unhealthy nodes in temporary subscriptions will be auto-removed after a delay. The subscription itself will not be deleted.",
+  "临时订阅的非健康节点会在一段时间后被自动删除。若开启了“节点全部删除后自动删除订阅”，节点全部删完后订阅本身也会被删除。":
+    "Unhealthy nodes in temporary subscriptions will be auto-removed after a delay. If auto-delete empty subscriptions is enabled, the subscription itself is removed once all nodes are gone.",
   "开始测试": "Start test",
   "例如 12h": "e.g. 12h",
   "例如 168h": "e.g. 168h",
