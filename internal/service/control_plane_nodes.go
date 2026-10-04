@@ -1,6 +1,8 @@
 package service
 
 import (
+	"encoding/base64"
+	"strconv"
 	"strings"
 	"time"
 
@@ -8,6 +10,8 @@ import (
 	"github.com/Resinat/Resin/internal/probe"
 	"github.com/Resinat/Resin/internal/subscription"
 )
+
+const nodeExportFilename = "resin-nodes-subscription.txt"
 
 // ------------------------------------------------------------------
 // Nodes
@@ -217,6 +221,31 @@ func (s *ControlPlaneService) GetNode(hashStr string) (*NodeSummary, error) {
 	}
 	ns := s.nodeEntryToSummary(h, entry)
 	return &ns, nil
+}
+
+// ExportNodes exports selected nodes as a base64-wrapped URI subscription text.
+func (s *ControlPlaneService) ExportNodes(hashStrs []string) (string, error) {
+	if len(hashStrs) == 0 {
+		return "", invalidArg("node_hashes: must contain at least one node hash")
+	}
+	items := make([]string, 0, len(hashStrs))
+	for i, hashStr := range hashStrs {
+		h, err := node.ParseHex(hashStr)
+		if err != nil {
+			return "", invalidArg("node_hashes[" + strconv.Itoa(i) + "]: invalid format")
+		}
+		entry, ok := s.Pool.GetEntry(h)
+		if !ok {
+			return "", notFound("node_hashes[" + strconv.Itoa(i) + "]: node not found")
+		}
+		uri, err := subscription.ExportNodeAsURI(entry.RawOptions)
+		if err != nil {
+			return "", invalidArg("node_hashes[" + strconv.Itoa(i) + "]: " + err.Error())
+		}
+		items = append(items, uri)
+	}
+	payload := strings.Join(items, "\n")
+	return base64.StdEncoding.EncodeToString([]byte(payload)), nil
 }
 
 // ProbeEgress triggers a synchronous egress probe and returns results.

@@ -20,6 +20,9 @@ const DEFAULT_CONFIG: RuntimeConfig = {
   latency_decay_window: "",
   cache_flush_interval: "",
   cache_flush_dirty_threshold: 0,
+  auto_remove_unhealthy_nodes_enabled: false,
+  auto_remove_unhealthy_nodes_delay: "",
+  auto_delete_empty_subscriptions_enabled: false,
 };
 
 function asNumber(raw: unknown, fallback: number): number {
@@ -79,6 +82,12 @@ function normalizeRuntimeConfig(raw: Partial<RuntimeConfig> | null | undefined):
       raw.cache_flush_dirty_threshold,
       DEFAULT_CONFIG.cache_flush_dirty_threshold,
     ),
+    auto_remove_unhealthy_nodes_enabled: Boolean(raw.auto_remove_unhealthy_nodes_enabled),
+    auto_remove_unhealthy_nodes_delay: asString(
+      raw.auto_remove_unhealthy_nodes_delay,
+      DEFAULT_CONFIG.auto_remove_unhealthy_nodes_delay,
+    ),
+    auto_delete_empty_subscriptions_enabled: Boolean(raw.auto_delete_empty_subscriptions_enabled),
   };
 }
 

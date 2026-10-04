@@ -33,12 +33,34 @@ type preMigrateHook func(db *sql.DB, driver migratedb.Driver) error
 
 // MigrateStateDB applies state.db migrations.
 func MigrateStateDB(db *sql.DB) error {
-	return migrateSQLiteDB(db, stateMigrationsPath, migrateDefaultTable, prepareLegacyStateBaseline)
+	return MigrateStateDBWithDialect(DialectSQLite, db)
 }
 
 // MigrateCacheDB applies cache.db migrations.
 func MigrateCacheDB(db *sql.DB) error {
-	return migrateSQLiteDB(db, cacheMigrationsPath, migrateDefaultTable, nil)
+	return MigrateCacheDBWithDialect(DialectSQLite, db)
+}
+
+func MigrateStateDBWithDialect(dialect Dialect, db *sql.DB) error {
+	switch dialect {
+	case DialectPostgres:
+		return migratePostgresStateDB(db)
+	case DialectSQLite:
+		return migrateSQLiteDB(db, stateMigrationsPath, migrateDefaultTable, prepareLegacyStateBaseline)
+	default:
+		return fmt.Errorf("migrate state db: unsupported dialect %q", dialect)
+	}
+}
+
+func MigrateCacheDBWithDialect(dialect Dialect, db *sql.DB) error {
+	switch dialect {
+	case DialectPostgres:
+		return migratePostgresCacheDB(db)
+	case DialectSQLite:
+		return migrateSQLiteDB(db, cacheMigrationsPath, migrateDefaultTable, nil)
+	default:
+		return fmt.Errorf("migrate cache db: unsupported dialect %q", dialect)
+	}
 }
 
 const migrateDefaultTable = "schema_migrations"

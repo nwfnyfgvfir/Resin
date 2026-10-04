@@ -10,6 +10,7 @@ import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 import { AppProviders } from "./app/providers";
 import { AppRoutes } from "./app/routes";
+import { AuthUnauthorizedBridge } from "./features/auth/AuthUnauthorizedBridge";
 import "./i18n";
 import "./styles/theme.css";
 
@@ -17,6 +18,7 @@ createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <AppProviders>
       <BrowserRouter basename="/ui">
+        <AuthUnauthorizedBridge />
         <AppRoutes />
       </BrowserRouter>
     </AppProviders>

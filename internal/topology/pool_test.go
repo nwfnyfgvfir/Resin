@@ -922,6 +922,107 @@ func TestEphemeralCleaner_SkipsNonEphemeral(t *testing.T) {
 	}
 }
 
+func TestEphemeralCleaner_GlobalAutoRemoveEvictsNonEphemeral(t *testing.T) {
+	subMgr := NewSubscriptionManager()
+	sub := subscription.NewSubscription("s1", "RegularSub", "url", true, false)
+	subMgr.Register(sub)
+
+	pool := newTestPool(subMgr)
+	raw := json.RawMessage(`{"type":"ss","server":"1.1.1.1"}`)
+	h := node.HashFromRawOptions(raw)
+
+	mn := subscription.NewManagedNodes()
+	mn.StoreNode(h, subscription.ManagedNode{Tags: []string{"node-1"}})
+	sub.SwapManagedNodes(mn)
+
+	pool.AddNodeFromSub(h, raw, "s1")
+
+	entry, _ := pool.GetEntry(h)
+	entry.CircuitOpenSince.Store(time.Now().Add(-2 * time.Minute).UnixNano())
+
+	cleaner := NewEphemeralCleaner(subMgr, pool)
+	cleaner.SetGlobalAutoRemove(
+		func() bool { return true },
+		func() time.Duration { return time.Minute },
+	)
+	cleaner.sweep()
+
+	if pool.Size() != 0 {
+		t.Fatal("non-ephemeral sub nodes should be evicted when global auto-remove is enabled")
+	}
+
+	managed, ok := sub.ManagedNodes().LoadNode(h)
+	if !ok {
+		t.Fatal("managed node should remain after eviction")
+	}
+	if !managed.Evicted {
+		t.Fatal("managed node should be marked evicted")
+	}
+}
+
+func TestEphemeralCleaner_DeletesEmptyEphemeralSubscription(t *testing.T) {
+	subMgr := NewSubscriptionManager()
+	sub := subscription.NewSubscription("s1", "EphSub", "url", true, true)
+	sub.SetEphemeralNodeEvictDelayNs(int64(1 * time.Minute))
+	sub.LastUpdatedNs.Store(time.Now().UnixNano())
+	subMgr.Register(sub)
+
+	pool := newTestPool(subMgr)
+	raw := json.RawMessage(`{"type":"ss","server":"1.1.1.1"}`)
+	h := node.HashFromRawOptions(raw)
+
+	mn := subscription.NewManagedNodes()
+	mn.StoreNode(h, subscription.ManagedNode{Tags: []string{"node-1"}})
+	sub.SwapManagedNodes(mn)
+
+	pool.AddNodeFromSub(h, raw, "s1")
+
+	entry, _ := pool.GetEntry(h)
+	entry.CircuitOpenSince.Store(time.Now().Add(-2 * time.Minute).UnixNano())
+
+	cleaner := NewEphemeralCleaner(subMgr, pool)
+	cleaner.SetAutoDeleteEmptySubscriptions(func() bool { return true })
+	cleaner.SetOnEmptySubscription(func(id string) {
+		if err := DeleteSubscriptionRuntime(nil, subMgr, pool, id); err != nil {
+			t.Fatalf("DeleteSubscriptionRuntime: %v", err)
+		}
+	})
+	cleaner.sweep()
+
+	if subMgr.Lookup("s1") != nil {
+		t.Fatal("empty ephemeral subscription should be deleted")
+	}
+}
+
+func TestEphemeralCleaner_KeepsEmptySubscriptionWhenAutoDeleteDisabled(t *testing.T) {
+	subMgr := NewSubscriptionManager()
+	sub := subscription.NewSubscription("s1", "EphSub", "url", true, true)
+	sub.SetEphemeralNodeEvictDelayNs(int64(1 * time.Minute))
+	sub.LastUpdatedNs.Store(time.Now().UnixNano())
+	subMgr.Register(sub)
+
+	pool := newTestPool(subMgr)
+	raw := json.RawMessage(`{"type":"ss","server":"1.1.1.1"}`)
+	h := node.HashFromRawOptions(raw)
+
+	mn := subscription.NewManagedNodes()
+	mn.StoreNode(h, subscription.ManagedNode{Tags: []string{"node-1"}})
+	sub.SwapManagedNodes(mn)
+
+	pool.AddNodeFromSub(h, raw, "s1")
+
+	entry, _ := pool.GetEntry(h)
+	entry.CircuitOpenSince.Store(time.Now().Add(-2 * time.Minute).UnixNano())
+
+	cleaner := NewEphemeralCleaner(subMgr, pool)
+	cleaner.SetAutoDeleteEmptySubscriptions(func() bool { return false })
+	cleaner.sweep()
+
+	if subMgr.Lookup("s1") == nil {
+		t.Fatal("empty subscription should remain when auto-delete is disabled")
+	}
+}
+
 func TestEphemeralCleaner_SkipsRecentCircuitBreak(t *testing.T) {
 	subMgr := NewSubscriptionManager()
 	sub := subscription.NewSubscription("s1", "EphSub", "url", true, true)

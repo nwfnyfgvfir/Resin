@@ -3,9 +3,11 @@ package service
 import (
 	"errors"
 	"net/netip"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/Resinat/Resin/internal/config"
 	"github.com/Resinat/Resin/internal/node"
 	"github.com/Resinat/Resin/internal/subscription"
 	"github.com/Resinat/Resin/internal/testutil"
@@ -209,5 +211,40 @@ func TestCleanupSubscriptionCircuitOpenNodes_SubscriptionNotFound(t *testing.T) 
 	}
 	if svcErr.Code != "NOT_FOUND" {
 		t.Fatalf("error code = %q, want NOT_FOUND", svcErr.Code)
+	}
+}
+
+func TestCleanupSubscriptionCircuitOpenNodes_DeletesEmptySubscriptionWhenEnabled(t *testing.T) {
+	cp, subMgr, pool := newCleanupSubscriptionTestService()
+
+	var runtimeCfg atomic.Pointer[config.RuntimeConfig]
+	cfg := config.NewDefaultRuntimeConfig()
+	cfg.AutoDeleteEmptySubscriptionsEnabled = true
+	runtimeCfg.Store(cfg)
+	cp.RuntimeCfg = &runtimeCfg
+
+	sub := subscription.NewSubscription("sub-empty", "sub-empty", "https://example.com/a", true, false)
+	sub.LastUpdatedNs.Store(time.Now().UnixNano())
+	subMgr.Register(sub)
+
+	circuitRaw := []byte(`{"type":"ss","server":"1.1.1.1","port":443}`)
+	circuitHash := node.HashFromRawOptions(circuitRaw)
+	pool.AddNodeFromSub(circuitHash, circuitRaw, sub.ID)
+	sub.ManagedNodes().StoreNode(circuitHash, subscription.ManagedNode{Tags: []string{"circuit"}})
+	circuitEntry, ok := pool.GetEntry(circuitHash)
+	if !ok {
+		t.Fatalf("missing circuit node %s in pool", circuitHash.Hex())
+	}
+	circuitEntry.CircuitOpenSince.Store(time.Now().Add(-time.Minute).UnixNano())
+
+	cleanedCount, err := cp.CleanupSubscriptionCircuitOpenNodes(sub.ID)
+	if err != nil {
+		t.Fatalf("CleanupSubscriptionCircuitOpenNodes: %v", err)
+	}
+	if cleanedCount != 1 {
+		t.Fatalf("cleaned_count = %d, want 1", cleanedCount)
+	}
+	if subMgr.Lookup(sub.ID) != nil {
+		t.Fatal("empty subscription should be deleted when auto-delete is enabled")
 	}
 }

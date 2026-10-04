@@ -850,9 +850,11 @@ func TestParseGeneralSubscription_ClashJSON_HysteriaAdvancedFields(t *testing.T)
 	if !containsAnyString(certificates, "-----BEGIN CERTIFICATE-----ABC") {
 		t.Fatalf("tls.certificate: got %v", certificates)
 	}
-	utls := mustMapField(t, tls, "utls")
-	if got := utls["fingerprint"]; got != "chrome" {
-		t.Fatalf("tls.utls.fingerprint: got %v", got)
+	// hysteria is QUIC-based: sing-box does not support uTLS here, so the
+	// parsed `fingerprint` must be dropped instead of producing tls.utls
+	// (which would make every connection fail → permanent circuit-break).
+	if _, exists := tls["utls"]; exists {
+		t.Fatalf("tls.utls must be absent for QUIC outbound, got %v", tls["utls"])
 	}
 }
 
@@ -1034,9 +1036,9 @@ func TestParseGeneralSubscription_ClashJSON_Hysteria2AdvancedFields(t *testing.T
 	if !containsAnyString(certificates, "-----BEGIN CERTIFICATE-----XYZ") {
 		t.Fatalf("tls.certificate: got %v", certificates)
 	}
-	utls := mustMapField(t, tls, "utls")
-	if got := utls["fingerprint"]; got != "firefox" {
-		t.Fatalf("tls.utls.fingerprint: got %v", got)
+	// hysteria2 is QUIC-based: tls.utls must be stripped (see #98).
+	if _, exists := tls["utls"]; exists {
+		t.Fatalf("tls.utls must be absent for QUIC outbound, got %v", tls["utls"])
 	}
 }
 
@@ -1707,9 +1709,9 @@ func TestParseGeneralSubscription_HY2URIAliasAndQueryPassword(t *testing.T) {
 	if got := tls["certificate_path"]; got != "/etc/ssl/certs/hy2.pem" {
 		t.Fatalf("tls.certificate_path: got %v", got)
 	}
-	utls := mustMapField(t, tls, "utls")
-	if got := utls["fingerprint"]; got != "chrome" {
-		t.Fatalf("tls.utls.fingerprint: got %v", got)
+	// hysteria2 is QUIC-based: the link's fp=chrome must not become tls.utls.
+	if _, exists := tls["utls"]; exists {
+		t.Fatalf("tls.utls must be absent for QUIC outbound, got %v", tls["utls"])
 	}
 }
 
@@ -2648,6 +2650,32 @@ custom-ss = custom, 3.3.3.3, 8388, aes-256-gcm, custom-pass
 	}
 }
 
+func TestExportNodeAsURI_RoundTripCommonProtocols(t *testing.T) {
+	cases := []string{
+		`{"type":"vmess","tag":"vmess-node","server":"vmess.example.com","server_port":443,"uuid":"11111111-2222-3333-4444-555555555555","security":"auto","alter_id":0,"tls":{"enabled":true,"server_name":"vmess.example.com"},"transport":{"type":"ws","path":"/ws","headers":{"Host":"ws.example.com"}}}`,
+		`{"type":"vless","tag":"vless-node","server":"vless.example.com","server_port":443,"uuid":"11111111-2222-3333-4444-555555555556","flow":"xtls-rprx-vision","tls":{"enabled":true,"server_name":"vless.example.com","utls":{"enabled":true,"fingerprint":"chrome"}},"transport":{"type":"grpc","service_name":"grpc-svc"}}`,
+		`{"type":"trojan","tag":"trojan-node","server":"trojan.example.com","server_port":443,"password":"secret","tls":{"enabled":true,"server_name":"trojan.example.com","insecure":true},"transport":{"type":"httpupgrade","host":"up.example.com","path":"/upgrade"}}`,
+		`{"type":"shadowsocks","tag":"ss-node","server":"1.1.1.1","server_port":8388,"method":"aes-128-gcm","password":"pass","plugin":"v2ray-plugin","plugin_opts":"mode=websocket;host=ws.example.com;tls"}`,
+		`{"type":"hysteria2","tag":"hy2-node","server":"hy2.example.com","server_port":443,"password":"hy2-password","server_ports":["443","8443-9443"],"up_mbps":20,"down_mbps":80,"hop_interval":"10s","tls":{"enabled":true,"server_name":"hy2.example.com","insecure":true},"obfs":{"type":"salamander","password":"obfs-secret"}}`,
+		`{"type":"socks","tag":"socks-node","server":"5.6.7.8","server_port":1080,"username":"user","password":"pass"}`,
+		`{"type":"http","tag":"http-node","server":"8.8.8.8","server_port":8080,"username":"user","password":"pass"}`,
+	}
+
+	for _, raw := range cases {
+		uri, err := ExportNodeAsURI(json.RawMessage(raw))
+		if err != nil {
+			t.Fatalf("ExportNodeAsURI(%s): %v", raw, err)
+		}
+		nodes, err := ParseGeneralSubscription([]byte(uri))
+		if err != nil {
+			t.Fatalf("ParseGeneralSubscription(%s): %v", uri, err)
+		}
+		if len(nodes) != 1 {
+			t.Fatalf("ParseGeneralSubscription(%s) len = %d, want 1", uri, len(nodes))
+		}
+	}
+}
+
 func TestParseGeneralSubscription_UnknownFormatReturnsError(t *testing.T) {
 	_, err := ParseGeneralSubscription([]byte("this is not a subscription format"))
 	if err == nil {
@@ -2708,4 +2736,82 @@ func containsAnyString(values []any, expected string) bool {
 		}
 	}
 	return false
+}
+
+// TestParseGeneralSubscription_VMessTCPHTTPHeaderCamouflage is a regression
+// test for #99: vmess `net=tcp` + `type=http` (Xray "RAW" / HTTP-header
+// camouflage) must produce an `http` transport, otherwise the node never
+// connects and stays permanently circuit-broken.
+func TestParseGeneralSubscription_VMessTCPHTTPHeaderCamouflage(t *testing.T) {
+	payload := `{"v":"2","ps":"RAW-test","add":"example.com","port":60443,` +
+		`"id":"11111111-2222-3333-4444-555555555556","aid":0,"scy":"auto",` +
+		`"net":"tcp","type":"http","host":"","path":"/","tls":"none"}`
+	data := []byte("vmess://" + base64.StdEncoding.EncodeToString([]byte(payload)))
+
+	nodes, err := ParseGeneralSubscription(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 1 {
+		t.Fatalf("expected 1 parsed node, got %d", len(nodes))
+	}
+	obj := parseNodeRaw(t, nodes[0].RawOptions)
+	transport := mustMapField(t, obj, "transport")
+	if got := transport["type"]; got != "http" {
+		t.Fatalf("transport.type: got %v", got)
+	}
+	if got := transport["path"]; got != "/" {
+		t.Fatalf("transport.path: got %v", got)
+	}
+}
+
+// TestParseGeneralSubscription_VMessTCPPlainHasNoTransport guards against
+// over-eager #99 handling: plain `net=tcp` + `type=none` must stay transport-less.
+func TestParseGeneralSubscription_VMessTCPPlainHasNoTransport(t *testing.T) {
+	payload := `{"v":"2","ps":"plain","add":"example.com","port":443,` +
+		`"id":"11111111-2222-3333-4444-555555555557","aid":0,"net":"tcp","type":"none"}`
+	data := []byte("vmess://" + base64.StdEncoding.EncodeToString([]byte(payload)))
+
+	nodes, err := ParseGeneralSubscription(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 1 {
+		t.Fatalf("expected 1 parsed node, got %d", len(nodes))
+	}
+	obj := parseNodeRaw(t, nodes[0].RawOptions)
+	if _, exists := obj["transport"]; exists {
+		t.Fatalf("plain TCP vmess must not have transport, got %v", obj["transport"])
+	}
+}
+
+// TestStripUnsupportedUTLS covers #98: uTLS is only valid over TCP-based TLS,
+// so QUIC outbounds (hysteria/hysteria2/tuic or a `quic` transport) must have
+// tls.utls removed, while TCP-based outbounds keep it.
+func TestStripUnsupportedUTLS(t *testing.T) {
+	utlsTLS := func() map[string]any {
+		return map[string]any{"utls": map[string]any{"enabled": true, "fingerprint": "chrome"}}
+	}
+	cases := []struct {
+		name     string
+		outbound map[string]any
+		wantUTLS bool
+	}{
+		{"hysteria2 drops utls", map[string]any{"type": "hysteria2", "tls": utlsTLS()}, false},
+		{"hysteria drops utls", map[string]any{"type": "hysteria", "tls": utlsTLS()}, false},
+		{"tuic drops utls", map[string]any{"type": "tuic", "tls": utlsTLS()}, false},
+		{"quic transport drops utls", map[string]any{"type": "vless", "transport": map[string]any{"type": "quic"}, "tls": utlsTLS()}, false},
+		{"tcp-based outbound keeps utls", map[string]any{"type": "vless", "transport": map[string]any{"type": "ws"}, "tls": utlsTLS()}, true},
+		{"quic outbound without tls is safe", map[string]any{"type": "hysteria2"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stripUnsupportedUTLS(tc.outbound)
+			tls, _ := tc.outbound["tls"].(map[string]any)
+			_, hasUTLS := tls["utls"]
+			if hasUTLS != tc.wantUTLS {
+				t.Fatalf("tls.utls present = %v, want %v", hasUTLS, tc.wantUTLS)
+			}
+		})
+	}
 }

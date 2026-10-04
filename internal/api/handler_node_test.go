@@ -1,8 +1,10 @@
 package api
 
 import (
+	"encoding/base64"
 	"net/http"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
@@ -212,6 +214,56 @@ func TestHandleListNodes_IncludesReferenceLatencyMs(t *testing.T) {
 	}
 	if item["reference_latency_ms"] != float64(60) {
 		t.Fatalf("reference_latency_ms: got %v, want 60", item["reference_latency_ms"])
+	}
+}
+
+func TestHandleExportNodes_ReturnsBase64WrappedURISubscription(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+
+	sub := subscription.NewSubscription("11111111-1111-1111-1111-111111111111", "sub-a", "https://example.com/a", true, false)
+	cp.SubMgr.Register(sub)
+
+	rawA := []byte(`{"type":"shadowsocks","tag":"ss-node","server":"1.1.1.1","server_port":8388,"method":"aes-128-gcm","password":"pass"}`)
+	rawB := []byte(`{"type":"trojan","tag":"trojan-node","server":"2.2.2.2","server_port":443,"password":"secret","tls":{"enabled":true,"server_name":"example.com"}}`)
+	hashA := node.HashFromRawOptions(rawA)
+	hashB := node.HashFromRawOptions(rawB)
+	cp.Pool.AddNodeFromSub(hashA, rawA, sub.ID)
+	cp.Pool.AddNodeFromSub(hashB, rawB, sub.ID)
+	sub.ManagedNodes().StoreNode(hashA, subscription.ManagedNode{Tags: []string{"tag-a"}})
+	sub.ManagedNodes().StoreNode(hashB, subscription.ManagedNode{Tags: []string{"tag-b"}})
+
+	rec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/nodes:export", map[string]any{
+		"node_hashes": []string{hashB.Hex(), hashA.Hex()},
+	}, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("export nodes status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Disposition"); got != `attachment; filename="resin-nodes-subscription.txt"` {
+		t.Fatalf("content-disposition: got %q, want %q", got, `attachment; filename="resin-nodes-subscription.txt"`)
+	}
+	if got := rec.Header().Get("Content-Type"); !strings.Contains(got, "text/plain") {
+		t.Fatalf("content-type: got %q, want text/plain", got)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(rec.Body.String()))
+	if err != nil {
+		t.Fatalf("response body should be base64 text: %v body=%q", err, rec.Body.String())
+	}
+	lines := strings.Split(strings.TrimSpace(string(decoded)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("exported lines len = %d, want 2 text=%s", len(lines), string(decoded))
+	}
+	if !strings.HasPrefix(lines[0], "trojan://") {
+		t.Fatalf("first line = %q, want trojan URI", lines[0])
+	}
+	if !strings.HasPrefix(lines[1], "ss://") {
+		t.Fatalf("second line = %q, want shadowsocks URI", lines[1])
+	}
+	nodes, err := subscription.ParseGeneralSubscription(decoded)
+	if err != nil {
+		t.Fatalf("ParseGeneralSubscription(exported): %v text=%s", err, string(decoded))
+	}
+	if len(nodes) != 2 {
+		t.Fatalf("parsed exported nodes len = %d, want 2 text=%s", len(nodes), string(decoded))
 	}
 }
 

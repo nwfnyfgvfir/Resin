@@ -11,11 +11,19 @@ import (
 	"github.com/Resinat/Resin/internal/subscription"
 )
 
-// EphemeralCleaner periodically removes unhealthy nodes from ephemeral subscriptions.
+// EphemeralCleaner periodically removes unhealthy nodes from subscriptions.
+// Ephemeral subscriptions always participate; non-ephemeral subscriptions
+// participate when global auto-remove is enabled in runtime config.
 type EphemeralCleaner struct {
 	subManager    *SubscriptionManager
 	pool          *GlobalNodePool
 	onNodeEvicted func(subID string, hash node.Hash)
+
+	autoRemoveUnhealthyNodesEnabled func() bool
+	autoRemoveUnhealthyNodesDelay   func() time.Duration
+	autoDeleteEmptySubscriptions    func() bool
+
+	onEmptySubscription func(subID string)
 
 	stopCh chan struct{}
 	wg     sync.WaitGroup
@@ -37,6 +45,27 @@ func NewEphemeralCleaner(
 // SetOnNodeEvicted sets callback invoked for each newly-evicted node.
 func (c *EphemeralCleaner) SetOnNodeEvicted(fn func(subID string, hash node.Hash)) {
 	c.onNodeEvicted = fn
+}
+
+// SetGlobalAutoRemove configures global auto-removal for non-ephemeral subscriptions.
+func (c *EphemeralCleaner) SetGlobalAutoRemove(
+	enabled func() bool,
+	delay func() time.Duration,
+) {
+	c.autoRemoveUnhealthyNodesEnabled = enabled
+	c.autoRemoveUnhealthyNodesDelay = delay
+}
+
+// SetAutoDeleteEmptySubscriptions configures whether subscriptions with no active
+// nodes should be deleted after auto-removal.
+func (c *EphemeralCleaner) SetAutoDeleteEmptySubscriptions(enabled func() bool) {
+	c.autoDeleteEmptySubscriptions = enabled
+}
+
+// SetOnEmptySubscription sets callback invoked when an eligible subscription
+// has no active nodes and should be deleted.
+func (c *EphemeralCleaner) SetOnEmptySubscription(fn func(subID string)) {
+	c.onEmptySubscription = fn
 }
 
 // Start launches the background cleaner goroutine.
@@ -65,20 +94,21 @@ func (c *EphemeralCleaner) sweep() {
 func (c *EphemeralCleaner) sweepWithHook(betweenScans func()) {
 	now := time.Now().UnixNano()
 
-	type ephemeralSub struct {
+	type subscriptionTarget struct {
 		id  string
 		sub *subscription.Subscription
 	}
-	ephemeralSubs := make([]ephemeralSub, 0, c.subManager.Size())
+	targetSubs := make([]subscriptionTarget, 0, c.subManager.Size())
+	globalAutoRemove := c.globalAutoRemoveEnabled()
 
 	c.subManager.Range(func(id string, sub *subscription.Subscription) bool {
-		if sub.Ephemeral() {
-			ephemeralSubs = append(ephemeralSubs, ephemeralSub{id: id, sub: sub})
+		if sub.Ephemeral() || globalAutoRemove {
+			targetSubs = append(targetSubs, subscriptionTarget{id: id, sub: sub})
 		}
 		return true
 	})
 
-	if len(ephemeralSubs) == 0 {
+	if len(targetSubs) == 0 {
 		return
 	}
 
@@ -86,13 +116,13 @@ func (c *EphemeralCleaner) sweepWithHook(betweenScans func()) {
 	if workers < 1 {
 		workers = 1
 	}
-	if workers > len(ephemeralSubs) {
-		workers = len(ephemeralSubs)
+	if workers > len(targetSubs) {
+		workers = len(targetSubs)
 	}
 
 	sem := make(chan struct{}, workers)
 	var wg sync.WaitGroup
-	for _, item := range ephemeralSubs {
+	for _, item := range targetSubs {
 		sem <- struct{}{}
 		wg.Add(1)
 		go func(id string, sub *subscription.Subscription) {
@@ -115,7 +145,7 @@ func (c *EphemeralCleaner) sweepOneSubscription(
 		evictedHashes []node.Hash
 	)
 	sub.WithOpLock(func() {
-		evictDelayNs := sub.EphemeralNodeEvictDelayNs()
+		evictDelayNs := c.evictDelayNs(sub)
 		evictCount, evictedHashes = CleanupSubscriptionNodesWithConfirmNoLock(
 			sub,
 			c.pool,
@@ -132,8 +162,51 @@ func (c *EphemeralCleaner) sweepOneSubscription(
 	}
 
 	if evictCount > 0 {
-		log.Printf("[ephemeral] evicted %d nodes from sub %s", evictCount, id)
+		log.Printf("[unhealthy-node-cleaner] evicted %d nodes from sub %s", evictCount, id)
 	}
+
+	c.maybeDeleteEmptySubscription(id, sub)
+}
+
+func (c *EphemeralCleaner) maybeDeleteEmptySubscription(id string, sub *subscription.Subscription) {
+	if c.onEmptySubscription == nil || !c.autoDeleteEmptySubscriptionsEnabled() {
+		return
+	}
+	if sub == nil || !c.participatesInAutoRemove(sub) {
+		return
+	}
+	if !SubscriptionHasNoActiveNodes(sub) {
+		return
+	}
+	c.onEmptySubscription(id)
+}
+
+func (c *EphemeralCleaner) autoDeleteEmptySubscriptionsEnabled() bool {
+	if c.autoDeleteEmptySubscriptions == nil {
+		return false
+	}
+	return c.autoDeleteEmptySubscriptions()
+}
+
+func (c *EphemeralCleaner) participatesInAutoRemove(sub *subscription.Subscription) bool {
+	return sub.Ephemeral() || c.globalAutoRemoveEnabled()
+}
+
+func (c *EphemeralCleaner) globalAutoRemoveEnabled() bool {
+	if c.autoRemoveUnhealthyNodesEnabled == nil {
+		return false
+	}
+	return c.autoRemoveUnhealthyNodesEnabled()
+}
+
+func (c *EphemeralCleaner) evictDelayNs(sub *subscription.Subscription) int64 {
+	if sub.Ephemeral() {
+		return sub.EphemeralNodeEvictDelayNs()
+	}
+	if c.autoRemoveUnhealthyNodesDelay != nil {
+		return int64(c.autoRemoveUnhealthyNodesDelay())
+	}
+	return 0
 }
 
 func (c *EphemeralCleaner) shouldEvictEntry(entry *node.NodeEntry, now int64, evictDelayNs int64) bool {

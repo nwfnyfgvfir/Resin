@@ -36,6 +36,16 @@ func newRequestLifecycle(
 			clientIP = r.RemoteAddr // fallback: bare IP or unparseable
 		}
 	}
+	return newRequestLifecycleFromFields(events, proxyType, isConnect, method, clientIP)
+}
+
+func newRequestLifecycleFromFields(
+	events EventEmitter,
+	proxyType ProxyType,
+	isConnect bool,
+	method string,
+	clientIP string,
+) *requestLifecycle {
 	now := time.Now()
 	return &requestLifecycle{
 		startedAt: now,

@@ -61,6 +61,14 @@ export function AppShell() {
   const version = systemInfoQuery.data?.version?.trim();
 
   const envConfig = envConfigQuery.data;
+  const persistenceDialect = envConfig?.persistence_dialect?.trim();
+  const persistenceLabel = persistenceDialect
+    ? persistenceDialect.toLowerCase() === "postgres"
+      ? "PostgreSQL"
+      : persistenceDialect.toLowerCase() === "sqlite"
+        ? "SQLite"
+        : persistenceDialect
+    : null;
   const authWarnings: string[] = [];
   if (envConfig && !envConfig.admin_token_set) {
     authWarnings.push(t("RESIN_ADMIN_TOKEN 为空，控制面 API 免认证"));
@@ -98,6 +106,7 @@ export function AppShell() {
               ) : null}
             </div>
             <p className="brand-subtitle">{t("高性能粘性代理池 · 管理面板")}</p>
+            {persistenceLabel ? <p className="brand-meta">{t("数据库类型")}: {persistenceLabel}</p> : null}
           </div>
         </div>
 

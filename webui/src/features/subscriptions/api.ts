@@ -2,6 +2,7 @@ import { apiRequest } from "../../lib/api-client";
 import type {
   PageResponse,
   Subscription,
+  SubscriptionBackupFile,
   SubscriptionCreateInput,
   SubscriptionUpdateInput,
 } from "./types";
@@ -83,6 +84,13 @@ export async function deleteSubscription(id: string): Promise<void> {
   });
 }
 
+export async function deleteSubscriptions(ids: string[]): Promise<void> {
+  await apiRequest<void>(basePath, {
+    method: "DELETE",
+    body: { subscription_ids: ids },
+  });
+}
+
 export async function refreshSubscription(id: string): Promise<void> {
   await apiRequest<{ status: "ok" }>(`${basePath}/${id}/actions/refresh`, {
     method: "POST",
@@ -94,4 +102,15 @@ export async function cleanupSubscriptionCircuitOpenNodes(id: string): Promise<n
     method: "POST",
   });
   return data.cleaned_count;
+}
+
+export async function exportSubscriptions(): Promise<SubscriptionBackupFile> {
+  return apiRequest<SubscriptionBackupFile>(`${basePath}:export`);
+}
+
+export async function importSubscriptions(input: SubscriptionBackupFile): Promise<SubscriptionBackupFile> {
+  return apiRequest<SubscriptionBackupFile>(`${basePath}:import`, {
+    method: "POST",
+    body: input,
+  });
 }

@@ -40,8 +40,11 @@ type resinApp struct {
 	metricsManager *metrics.Manager
 	requestlogRepo *requestlog.Repo
 	requestlogSvc  *requestlog.Service
+	inboundHandler http.Handler
 	inboundSrv     *http.Server
 	inboundLn      net.Listener
+	socks5Proxy    *proxy.Socks5Proxy
+	socks5Ln       net.Listener
 	transportPool  *proxy.OutboundTransportPool
 }
 
@@ -54,7 +57,14 @@ func run() error {
 		startupWarnf("%s", warning)
 	}
 
-	engine, dbCloser, err := state.PersistenceBootstrap(envCfg.StateDir, envCfg.CacheDir)
+	engine, dbCloser, err := state.PersistenceBootstrapWithOptions(state.BootstrapOptions{
+		Dialect:      state.Dialect(envCfg.PersistenceDialect),
+		StateDir:     envCfg.StateDir,
+		CacheDir:     envCfg.CacheDir,
+		DatabaseURL:  envCfg.DatabaseURL,
+		MaxOpenConns: envCfg.DatabaseMaxOpenConn,
+		MaxIdleConns: envCfg.DatabaseMaxIdleConn,
+	})
 	if err != nil {
 		return fmt.Errorf("persistence bootstrap: %w", err)
 	}
@@ -414,6 +424,22 @@ func (a *resinApp) buildNetworkServers(engine *state.StateEngine) error {
 		OutboundTransport: outboundTransportCfg,
 		TransportPool:     a.transportPool,
 	})
+	effectiveSocks5Port := socks5EffectivePort(a.envCfg)
+	if effectiveSocks5Port > 0 && a.envCfg.DeploymentProfile.AllowsSocks5TCP() {
+		a.socks5Proxy = proxy.NewSocks5Proxy(proxy.Socks5ProxyConfig{
+			ProxyToken:        a.envCfg.ProxyToken,
+			AuthVersion:       string(a.envCfg.AuthVersion),
+			DeploymentProfile: a.envCfg.DeploymentProfile,
+			AdvertiseHost:     a.envCfg.Socks5AdvertiseHost,
+			ListenAddress:     a.envCfg.ListenAddress,
+			ListenPort:        effectiveSocks5Port,
+			Router:            a.topoRuntime.router,
+			Pool:              a.topoRuntime.pool,
+			Health:            a.topoRuntime.pool,
+			Events:            proxyEvents,
+			MetricsSink:       a.metricsManager,
+		})
+	}
 
 	reverseProxy := proxy.NewReverseProxy(proxy.ReverseProxyConfig{
 		ProxyToken:        a.envCfg.ProxyToken,
@@ -436,12 +462,22 @@ func (a *resinApp) buildNetworkServers(engine *state.StateEngine) error {
 		apiSrv.Handler(),
 		tokenActionHandler,
 	)
+	a.inboundHandler = inboundHandler
 	inboundLn, err := net.Listen("tcp", formatListenAddress(a.envCfg.ListenAddress, a.envCfg.ResinPort))
 	if err != nil {
 		return fmt.Errorf("resin server listen: %w", err)
 	}
 	a.inboundLn = proxy.NewCountingListener(inboundLn, a.metricsManager)
 	a.inboundSrv = &http.Server{Handler: inboundHandler}
+
+	if a.socks5Proxy != nil && socks5PortExposedSeparately(a.envCfg) {
+		socks5Ln, err := net.Listen("tcp", formatListenAddress(a.envCfg.ListenAddress, a.envCfg.Socks5Port))
+		if err != nil {
+			_ = a.inboundLn.Close()
+			return fmt.Errorf("socks5 server listen: %w", err)
+		}
+		a.socks5Ln = proxy.NewCountingListener(socks5Ln, a.metricsManager)
+	}
 
 	return nil
 }
@@ -485,10 +521,30 @@ func (a *resinApp) startServers() <-chan error {
 		}
 	}
 
-	go func() {
-		log.Printf("Resin server starting on %s", formatListenURL(a.envCfg.ListenAddress, a.envCfg.ResinPort))
-		reportServerErr("resin server", a.inboundSrv.Serve(a.inboundLn))
-	}()
+	if a.envCfg != nil && a.envCfg.DeploymentProfile.SharesSocks5OnResinPort() && a.socks5Proxy != nil {
+		go func() {
+			log.Printf("Resin mixed inbound server starting on %s (%s)", formatListenURL(a.envCfg.ListenAddress, a.envCfg.ResinPort), describeDeploymentProfileBehavior(a.envCfg))
+			for {
+				conn, err := a.inboundLn.Accept()
+				if err != nil {
+					reportServerErr("resin mixed inbound server", err)
+					return
+				}
+				go serveMixedInboundConn(conn, a.envCfg.DeploymentProfile, a.inboundHandler, a.socks5Proxy)
+			}
+		}()
+	} else {
+		go func() {
+			log.Printf("Resin server starting on %s", formatListenURL(a.envCfg.ListenAddress, a.envCfg.ResinPort))
+			reportServerErr("resin server", a.inboundSrv.Serve(a.inboundLn))
+		}()
+	}
+	if a.socks5Proxy != nil && a.socks5Ln != nil {
+		go func() {
+			log.Printf("SOCKS5 server starting on %s", describeSocks5Listener(a.envCfg))
+			reportServerErr("socks5 server", a.socks5Proxy.Serve(a.socks5Ln))
+		}()
+	}
 
 	return serverErrCh
 }
@@ -517,6 +573,12 @@ func formatListenURL(listenAddress string, port int) string {
 }
 
 func (a *resinApp) shutdown(ctx context.Context) {
+	if a.socks5Ln != nil {
+		if err := a.socks5Ln.Close(); err != nil {
+			log.Printf("SOCKS5 server close error: %v", err)
+		}
+		log.Println("SOCKS5 server stopped")
+	}
 	if err := a.inboundSrv.Shutdown(ctx); err != nil {
 		log.Printf("Server shutdown error: %v", err)
 	}

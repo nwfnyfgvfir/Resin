@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createColumnHelper } from "@tanstack/react-table";
-import { AlertTriangle, Eraser, Globe, RefreshCw, Sparkles, X, Zap } from "lucide-react";
+import { AlertTriangle, Copy, Eraser, Globe, RefreshCw, Sparkles, X, Zap } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useLocation } from "react-router-dom";
 import { Badge } from "../../components/ui/Badge";
@@ -18,8 +18,8 @@ import { formatDateTime, formatRelativeTime } from "../../lib/time";
 import { listPlatforms } from "../platforms/api";
 import type { Platform } from "../platforms/types";
 import { listSubscriptions } from "../subscriptions/api";
-import { getNode, listNodes, probeEgress, probeLatency } from "./api";
-import type { NodeSummary } from "./types";
+import { exportNodes, getNode, listNodes, probeEgress, probeLatency } from "./api";
+import type { NodeExportText, NodeSummary } from "./types";
 import { getAllRegions, getRegionName } from "./regions";
 import type { NodeListFilters, NodeSortBy, SortOrder } from "./types";
 
@@ -260,8 +260,28 @@ function regionToFlag(region: string | undefined): string {
   return name ? `${flag} ${code} (${name})` : `${flag} ${code}`;
 }
 
+function decodeNodeExportContent(content: NodeExportText): string {
+  const compactContent = content.replace(/\s+/g, "");
+  const padding = (4 - (compactContent.length % 4)) % 4;
+  const paddedContent = compactContent + "=".repeat(padding);
+  try {
+    const binary = window.atob(paddedContent);
+    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new Error("节点导出内容不是有效的 Base64 文本");
+  }
+}
+
+async function copyNodeExportToClipboard(content: NodeExportText) {
+  if (!navigator.clipboard?.writeText) {
+    throw new Error("当前浏览器不支持剪贴板写入");
+  }
+  await navigator.clipboard.writeText(decodeNodeExportContent(content));
+}
+
 export function NodesPage() {
-  const { locale, t } = useI18n();
+  const { t } = useI18n();
   const location = useLocation();
   const [draftFilters, setDraftFilters] = useState<NodeFilterDraft>(() => draftFromQuery(location.search));
   const [activeFilters, setActiveFilters] = useState<NodeListFilters>(() =>
@@ -272,6 +292,7 @@ export function NodesPage() {
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState<number>(200);
   const [selectedNodeHash, setSelectedNodeHash] = useState("");
+  const [selectedNodeHashes, setSelectedNodeHashes] = useState<Set<string>>(() => new Set());
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [pendingEgressHashes, setPendingEgressHashes] = useState<Set<string>>(() => new Set());
   const [pendingLatencyHashes, setPendingLatencyHashes] = useState<Set<string>>(() => new Set());
@@ -281,7 +302,7 @@ export function NodesPage() {
 
   const queryClient = useQueryClient();
 
-  const allRegions = useMemo(() => getAllRegions(), [locale]);
+  const allRegions = useMemo(() => getAllRegions(), []);
 
   const platformsQuery = useQuery({
     queryKey: ["platforms", "all"],
@@ -334,6 +355,8 @@ export function NodesPage() {
   const nodes = nodesPage.items;
 
   const totalPages = Math.max(1, Math.ceil(nodesPage.total / pageSize));
+  const selectedNodeCount = selectedNodeHashes.size;
+  const allCurrentPageSelected = nodes.length > 0 && nodes.every((node) => selectedNodeHashes.has(node.node_hash));
 
   const selectedNode = useMemo(() => {
     if (!selectedNodeHash) {
@@ -382,6 +405,40 @@ export function NodesPage() {
     }
   };
 
+  const toggleNodeSelection = (nodeHash: string, checked: boolean) => {
+    setSelectedNodeHashes((prev) => {
+      const next = new Set(prev);
+      if (checked) {
+        next.add(nodeHash);
+      } else {
+        next.delete(nodeHash);
+      }
+      return next;
+    });
+  };
+
+  const toggleCurrentPageSelection = (checked: boolean) => {
+    setSelectedNodeHashes((prev) => {
+      const next = new Set(prev);
+      for (const node of nodes) {
+        if (checked) {
+          next.add(node.node_hash);
+        } else {
+          next.delete(node.node_hash);
+        }
+      }
+      return next;
+    });
+  };
+
+  const handleExportSelectedNodes = async () => {
+    const hashes = Array.from(selectedNodeHashes);
+    if (!hashes.length) {
+      return;
+    }
+    await exportNodesMutation.mutateAsync(hashes);
+  };
+
   const probeEgressMutation = useMutation({
     mutationFn: async (hash: string) => probeEgress(hash),
     onSuccess: async (result) => {
@@ -409,6 +466,22 @@ export function NodesPage() {
     },
     onError: async (error) => {
       await refreshNodes();
+      showToast("error", formatApiErrorMessage(error, t));
+    },
+  });
+
+  const exportNodesMutation = useMutation({
+    mutationFn: async (hashes: string[]) => {
+      const content = await exportNodes(hashes);
+      await copyNodeExportToClipboard(content);
+      return {
+        count: hashes.length,
+      };
+    },
+    onSuccess: ({ count }) => {
+      showToast("success", t("已复制 {{count}} 个节点订阅链接到剪贴板", { count }));
+    },
+    onError: (error) => {
       showToast("error", formatApiErrorMessage(error, t));
     },
   });
@@ -490,6 +563,7 @@ export function NodesPage() {
       const next = { ...prev, [key]: value };
       setActiveFilters(draftToActiveFilters(next));
       setSelectedNodeHash("");
+      setSelectedNodeHashes(new Set());
       setDrawerOpen(false);
       setPage(0);
       return next;
@@ -500,6 +574,7 @@ export function NodesPage() {
     setDraftFilters(defaultFilterDraft);
     setActiveFilters(draftToActiveFilters(defaultFilterDraft));
     setSelectedNodeHash("");
+    setSelectedNodeHashes(new Set());
     setDrawerOpen(false);
     setPage(0);
   };
@@ -522,6 +597,30 @@ export function NodesPage() {
   const col = createColumnHelper<NodeSummary>();
 
   const nodeColumns = [
+    col.display({
+      id: "select",
+      header: () => (
+        <input
+          type="checkbox"
+          aria-label={t("选择当前页全部节点")}
+          checked={allCurrentPageSelected}
+          onChange={(event) => toggleCurrentPageSelection(event.target.checked)}
+          onClick={(event) => event.stopPropagation()}
+        />
+      ),
+      cell: (info) => {
+        const node = info.row.original;
+        return (
+          <input
+            type="checkbox"
+            aria-label={t("选择节点 {{name}}", { name: firstTag(node) })}
+            checked={selectedNodeHashes.has(node.node_hash)}
+            onChange={(event) => toggleNodeSelection(node.node_hash, event.target.checked)}
+            onClick={(event) => event.stopPropagation()}
+          />
+        );
+      },
+    }),
     col.accessor((row) => firstTag(row), {
       id: "tag",
       header: () => (
@@ -790,6 +889,10 @@ export function NodesPage() {
             </div>
 
             <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.125rem", marginLeft: "auto" }}>
+              <Button size="sm" variant="secondary" onClick={() => void handleExportSelectedNodes()} disabled={!selectedNodeCount || exportNodesMutation.isPending} style={{ minHeight: "32px", height: "32px", padding: "0 0.75rem", display: "flex", alignItems: "center", gap: "0.25rem" }}>
+                <Copy size={16} />
+                {selectedNodeCount ? t("复制选中（{{count}}）", { count: selectedNodeCount }) : t("复制节点")}
+              </Button>
               <Button size="sm" variant="secondary" onClick={refreshNodes} disabled={nodesQuery.isFetching} style={{ minHeight: "32px", height: "32px", padding: "0 0.75rem", display: "flex", alignItems: "center", gap: "0.25rem" }}>
                 <RefreshCw size={16} className={nodesQuery.isFetching ? "spin" : undefined} />
                 {t("刷新")}

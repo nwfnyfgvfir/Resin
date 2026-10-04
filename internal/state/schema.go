@@ -6,12 +6,13 @@ import (
 	"database/sql"
 	"fmt"
 
+	_ "github.com/lib/pq"
 	_ "modernc.org/sqlite" // pure-Go SQLite driver
 )
 
-// OpenDB opens (or creates) a SQLite database at path with recommended pragmas:
+// OpenSQLiteDB opens (or creates) a SQLite database at path with recommended pragmas:
 // WAL journal mode, synchronous=NORMAL, foreign_keys=ON, busy_timeout=5000.
-func OpenDB(path string) (*sql.DB, error) {
+func OpenSQLiteDB(path string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("open db %s: %w", path, err)
@@ -33,6 +34,29 @@ func OpenDB(path string) (*sql.DB, error) {
 		}
 	}
 
+	return db, nil
+}
+
+// OpenDB keeps backward compatibility for sqlite-backed callers.
+func OpenDB(path string) (*sql.DB, error) {
+	return OpenSQLiteDB(path)
+}
+
+func openPostgresDB(dsn string, maxOpenConns, maxIdleConns int) (*sql.DB, error) {
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open postgres db: %w", err)
+	}
+	if maxOpenConns > 0 {
+		db.SetMaxOpenConns(maxOpenConns)
+	}
+	if maxIdleConns > 0 {
+		db.SetMaxIdleConns(maxIdleConns)
+	}
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("ping postgres db: %w", err)
+	}
 	return db, nil
 }
 

@@ -336,8 +336,28 @@ func newTopologyRuntime(
 		subManager,
 		pool,
 	)
+	ephemeralCleaner.SetGlobalAutoRemove(
+		func() bool {
+			return runtimeConfigSnapshot(runtimeCfg).AutoRemoveUnhealthyNodesEnabled
+		},
+		func() time.Duration {
+			return time.Duration(runtimeConfigSnapshot(runtimeCfg).AutoRemoveUnhealthyNodesDelay)
+		},
+	)
+	ephemeralCleaner.SetAutoDeleteEmptySubscriptions(func() bool {
+		return runtimeConfigSnapshot(runtimeCfg).AutoDeleteEmptySubscriptionsEnabled
+	})
 	ephemeralCleaner.SetOnNodeEvicted(func(subID string, hash node.Hash) {
 		engine.MarkSubscriptionNode(subID, hash.Hex())
+	})
+	ephemeralCleaner.SetOnEmptySubscription(func(subID string) {
+		if err := topology.DeleteSubscriptionRuntime(engine, subManager, pool, subID); err != nil {
+			if !topology.IsSubscriptionNotFound(err) {
+				log.Printf("[unhealthy-node-cleaner] failed to delete empty subscription %s: %v", subID, err)
+			}
+			return
+		}
+		log.Printf("[unhealthy-node-cleaner] deleted empty subscription %s", subID)
 	})
 
 	return &topologyRuntime{

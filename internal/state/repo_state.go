@@ -3,7 +3,6 @@ package state
 import (
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -12,20 +11,23 @@ import (
 	"github.com/Resinat/Resin/internal/config"
 	"github.com/Resinat/Resin/internal/model"
 	"github.com/Resinat/Resin/internal/platform"
-	"modernc.org/sqlite"
-	sqlite3 "modernc.org/sqlite/lib"
 )
 
 // StateRepo wraps state.db and provides transactional CRUD for strong-persist data.
 // All writes are serialized by an internal mutex.
 type StateRepo struct {
-	db *sql.DB
-	mu sync.Mutex
+	db      *sql.DB
+	dialect Dialect
+	mu      sync.Mutex
 }
 
 // newStateRepo creates a StateRepo for the given state.db connection.
 func newStateRepo(db *sql.DB) *StateRepo {
-	return &StateRepo{db: db}
+	return newStateRepoWithDialect(db, DialectSQLite)
+}
+
+func newStateRepoWithDialect(db *sql.DB, dialect Dialect) *StateRepo {
+	return &StateRepo{db: db, dialect: dialect}
 }
 
 func encodeStringSliceJSON(values []string) (string, error) {
@@ -50,12 +52,28 @@ func decodeStringSliceJSON(raw string) ([]string, error) {
 	return out, nil
 }
 
+func (r *StateRepo) exec(query string, args ...any) (sql.Result, error) {
+	return r.db.Exec(rebindQuery(r.dialect, query), args...)
+}
+
+func (r *StateRepo) query(query string, args ...any) (*sql.Rows, error) {
+	return r.db.Query(rebindQuery(r.dialect, query), args...)
+}
+
+func (r *StateRepo) queryRow(query string, args ...any) *sql.Row {
+	return r.db.QueryRow(rebindQuery(r.dialect, query), args...)
+}
+
+func (r *StateRepo) txExec(tx *sql.Tx, query string, args ...any) (sql.Result, error) {
+	return tx.Exec(rebindQuery(r.dialect, query), args...)
+}
+
 // --- system_config ---
 
 // GetSystemConfig loads the runtime config and version from state.db.
 // Returns nil config and version 0 if no row exists.
 func (r *StateRepo) GetSystemConfig() (*config.RuntimeConfig, int, error) {
-	row := r.db.QueryRow("SELECT config_json, version FROM system_config WHERE id = 1")
+	row := r.queryRow("SELECT config_json, version FROM system_config WHERE id = 1")
 	var configJSON string
 	var version int
 	if err := row.Scan(&configJSON, &version); err != nil {
@@ -81,7 +99,7 @@ func (r *StateRepo) SaveSystemConfig(cfg *config.RuntimeConfig, version int, upd
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	_, err = r.db.Exec(`
+	_, err = r.exec(`
 		INSERT INTO system_config (id, config_json, version, updated_at_ns)
 		VALUES (1, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
@@ -148,7 +166,7 @@ func (r *StateRepo) UpsertPlatform(p model.Platform) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	_, err = r.db.Exec(`
+	_, err = r.exec(`
 		INSERT INTO platforms (id, name, sticky_ttl_ns, regex_filters_json, region_filters_json,
 		                       reverse_proxy_miss_action, reverse_proxy_empty_account_behavior,
 		                       reverse_proxy_fixed_account_header, allocation_policy, updated_at_ns)
@@ -167,7 +185,7 @@ func (r *StateRepo) UpsertPlatform(p model.Platform) error {
 		p.ReverseProxyMissAction, p.ReverseProxyEmptyAccountBehavior, p.ReverseProxyFixedAccountHeader,
 		p.AllocationPolicy, p.UpdatedAtNs)
 	if err != nil {
-		if isSQLiteUniqueConstraint(err) {
+		if isUniqueConstraint(err) {
 			return fmt.Errorf("%w: platform name already exists", ErrConflict)
 		}
 		return err
@@ -175,16 +193,14 @@ func (r *StateRepo) UpsertPlatform(p model.Platform) error {
 	return err
 }
 
-func isSQLiteUniqueConstraint(err error) bool {
-	var sqlErr *sqlite.Error
-	if !errors.As(err, &sqlErr) {
+func isUniqueConstraint(err error) bool {
+	if err == nil {
 		return false
 	}
-	switch sqlErr.Code() {
-	case sqlite3.SQLITE_CONSTRAINT_UNIQUE:
-		return true
-	}
-	return false
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "unique constraint") ||
+		strings.Contains(msg, "duplicate key") ||
+		strings.Contains(msg, "violates unique")
 }
 
 // DeletePlatform removes a platform by ID.
@@ -192,7 +208,7 @@ func (r *StateRepo) DeletePlatform(id string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	result, err := r.db.Exec("DELETE FROM platforms WHERE id = ?", id)
+	result, err := r.exec("DELETE FROM platforms WHERE id = ?", id)
 	if err != nil {
 		return err
 	}
@@ -205,7 +221,7 @@ func (r *StateRepo) DeletePlatform(id string) error {
 
 // GetPlatformName returns platform name by ID without decoding filter columns.
 func (r *StateRepo) GetPlatformName(id string) (string, error) {
-	row := r.db.QueryRow(`SELECT name FROM platforms WHERE id = ?`, id)
+	row := r.queryRow(`SELECT name FROM platforms WHERE id = ?`, id)
 	var name string
 	if err := row.Scan(&name); err != nil {
 		if err == sql.ErrNoRows {
@@ -218,7 +234,7 @@ func (r *StateRepo) GetPlatformName(id string) (string, error) {
 
 // GetPlatform returns one platform by ID.
 func (r *StateRepo) GetPlatform(id string) (*model.Platform, error) {
-	row := r.db.QueryRow(`SELECT id, name, sticky_ttl_ns, regex_filters_json, region_filters_json,
+	row := r.queryRow(`SELECT id, name, sticky_ttl_ns, regex_filters_json, region_filters_json,
 			reverse_proxy_miss_action, reverse_proxy_empty_account_behavior,
 			reverse_proxy_fixed_account_header, allocation_policy, updated_at_ns
 			FROM platforms WHERE id = ?`, id)
@@ -248,7 +264,7 @@ func (r *StateRepo) GetPlatform(id string) (*model.Platform, error) {
 
 // ListPlatforms returns all platforms.
 func (r *StateRepo) ListPlatforms() ([]model.Platform, error) {
-	rows, err := r.db.Query("SELECT id, name, sticky_ttl_ns, regex_filters_json, region_filters_json, reverse_proxy_miss_action, reverse_proxy_empty_account_behavior, reverse_proxy_fixed_account_header, allocation_policy, updated_at_ns FROM platforms")
+	rows, err := r.query("SELECT id, name, sticky_ttl_ns, regex_filters_json, region_filters_json, reverse_proxy_miss_action, reverse_proxy_empty_account_behavior, reverse_proxy_fixed_account_header, allocation_policy, updated_at_ns FROM platforms")
 	if err != nil {
 		return nil, err
 	}
@@ -298,7 +314,7 @@ func (r *StateRepo) UpsertSubscription(s model.Subscription) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	_, err := r.db.Exec(`
+	_, err := r.exec(`
 		INSERT INTO subscriptions (id, name, source_type, url, content, update_interval_ns, enabled,
 		                           ephemeral, ephemeral_node_evict_delay_ns, created_at_ns, updated_at_ns)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -322,7 +338,7 @@ func (r *StateRepo) DeleteSubscription(id string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	result, err := r.db.Exec("DELETE FROM subscriptions WHERE id = ?", id)
+	result, err := r.exec("DELETE FROM subscriptions WHERE id = ?", id)
 	if err != nil {
 		return err
 	}
@@ -335,7 +351,7 @@ func (r *StateRepo) DeleteSubscription(id string) error {
 
 // ListSubscriptions returns all subscriptions.
 func (r *StateRepo) ListSubscriptions() ([]model.Subscription, error) {
-	rows, err := r.db.Query(`SELECT id, name, source_type, url, content, update_interval_ns, enabled,
+	rows, err := r.query(`SELECT id, name, source_type, url, content, update_interval_ns, enabled,
 		ephemeral, ephemeral_node_evict_delay_ns, created_at_ns, updated_at_ns FROM subscriptions`)
 	if err != nil {
 		return nil, err
@@ -370,7 +386,7 @@ func (r *StateRepo) EnsureAccountHeaderRule(rule model.AccountHeaderRule) (bool,
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	result, err := r.db.Exec(`
+	result, err := r.exec(`
 		INSERT INTO account_header_rules (url_prefix, headers_json, updated_at_ns)
 		VALUES (?, ?, ?)
 		ON CONFLICT(url_prefix) DO NOTHING
@@ -399,7 +415,7 @@ func (r *StateRepo) UpsertAccountHeaderRuleWithCreated(rule model.AccountHeaderR
 	}
 	defer tx.Rollback()
 
-	insertRes, err := tx.Exec(`
+	insertRes, err := r.txExec(tx, `
 		INSERT INTO account_header_rules (url_prefix, headers_json, updated_at_ns)
 		VALUES (?, ?, ?)
 		ON CONFLICT(url_prefix) DO NOTHING
@@ -413,7 +429,7 @@ func (r *StateRepo) UpsertAccountHeaderRuleWithCreated(rule model.AccountHeaderR
 		inserted = true
 	} else {
 		// Existing row: apply update path.
-		if _, err := tx.Exec(`
+		if _, err := r.txExec(tx, `
 				UPDATE account_header_rules
 				SET headers_json = ?, updated_at_ns = ?
 				WHERE url_prefix = ?
@@ -433,7 +449,7 @@ func (r *StateRepo) DeleteAccountHeaderRule(prefix string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	result, err := r.db.Exec("DELETE FROM account_header_rules WHERE url_prefix = ?", prefix)
+	result, err := r.exec("DELETE FROM account_header_rules WHERE url_prefix = ?", prefix)
 	if err != nil {
 		return err
 	}
@@ -446,7 +462,7 @@ func (r *StateRepo) DeleteAccountHeaderRule(prefix string) error {
 
 // ListAccountHeaderRules returns all rules.
 func (r *StateRepo) ListAccountHeaderRules() ([]model.AccountHeaderRule, error) {
-	rows, err := r.db.Query("SELECT url_prefix, headers_json, updated_at_ns FROM account_header_rules")
+	rows, err := r.query("SELECT url_prefix, headers_json, updated_at_ns FROM account_header_rules")
 	if err != nil {
 		return nil, err
 	}

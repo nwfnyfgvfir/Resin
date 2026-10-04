@@ -30,6 +30,13 @@ type RuntimeConfig struct {
 	// Persistence
 	CacheFlushInterval       Duration `json:"cache_flush_interval"`
 	CacheFlushDirtyThreshold int      `json:"cache_flush_dirty_threshold"`
+
+	// Unhealthy node auto-removal (applies to non-ephemeral subscriptions).
+	AutoRemoveUnhealthyNodesEnabled bool     `json:"auto_remove_unhealthy_nodes_enabled"`
+	AutoRemoveUnhealthyNodesDelay   Duration `json:"auto_remove_unhealthy_nodes_delay"`
+
+	// Delete subscriptions that no longer have any active nodes after auto-removal.
+	AutoDeleteEmptySubscriptionsEnabled bool `json:"auto_delete_empty_subscriptions_enabled"`
 }
 
 // NewDefaultRuntimeConfig returns a RuntimeConfig populated with the default
@@ -56,5 +63,10 @@ func NewDefaultRuntimeConfig() *RuntimeConfig {
 
 		CacheFlushInterval:       Duration(5 * time.Minute),
 		CacheFlushDirtyThreshold: 1000,
+
+		AutoRemoveUnhealthyNodesEnabled: false,
+		AutoRemoveUnhealthyNodesDelay:   Duration(72 * time.Hour),
+
+		AutoDeleteEmptySubscriptionsEnabled: false,
 	}
 }

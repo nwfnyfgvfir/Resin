@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
+	"slices"
 	"strings"
 	"time"
 
@@ -37,6 +39,23 @@ type SubscriptionResponse struct {
 	LastChecked             string `json:"last_checked,omitempty"`
 	LastUpdated             string `json:"last_updated,omitempty"`
 	LastError               string `json:"last_error,omitempty"`
+}
+
+type SubscriptionBackupItem struct {
+	Name                    string `json:"name"`
+	SourceType              string `json:"source_type"`
+	URL                     string `json:"url,omitempty"`
+	Content                 string `json:"content,omitempty"`
+	UpdateInterval          string `json:"update_interval"`
+	Enabled                 bool   `json:"enabled"`
+	Ephemeral               bool   `json:"ephemeral"`
+	EphemeralNodeEvictDelay string `json:"ephemeral_node_evict_delay"`
+}
+
+type SubscriptionBackupFile struct {
+	Version       int                      `json:"version"`
+	ExportedAt    string                   `json:"exported_at"`
+	Subscriptions []SubscriptionBackupItem `json:"subscriptions"`
 }
 
 func (s *ControlPlaneService) subToResponse(sub *subscription.Subscription) SubscriptionResponse {
@@ -112,6 +131,73 @@ func (s *ControlPlaneService) GetSubscription(id string) (*SubscriptionResponse,
 	return &r, nil
 }
 
+// ExportSubscriptions returns a portable subscription backup document.
+func (s *ControlPlaneService) ExportSubscriptions() (*SubscriptionBackupFile, error) {
+	subs, err := s.ListSubscriptions(nil)
+	if err != nil {
+		return nil, err
+	}
+	slices.SortFunc(subs, func(a, b SubscriptionResponse) int {
+		return strings.Compare(a.Name+"\x00"+a.ID, b.Name+"\x00"+b.ID)
+	})
+	items := make([]SubscriptionBackupItem, 0, len(subs))
+	for _, sub := range subs {
+		items = append(items, backupItemFromResponse(sub))
+	}
+	return &SubscriptionBackupFile{
+		Version:       subscriptionBackupVersion,
+		ExportedAt:    time.Now().UTC().Format(time.RFC3339Nano),
+		Subscriptions: items,
+	}, nil
+}
+
+// ImportSubscriptions appends subscriptions from a backup document.
+func (s *ControlPlaneService) ImportSubscriptions(doc SubscriptionBackupFile) (*SubscriptionBackupFile, error) {
+	if doc.Version != subscriptionBackupVersion {
+		return nil, invalidArg(fmt.Sprintf("version: must be %d", subscriptionBackupVersion))
+	}
+	if doc.Subscriptions == nil {
+		return nil, invalidArg("subscriptions is required")
+	}
+
+	requests := make([]CreateSubscriptionRequest, 0, len(doc.Subscriptions))
+	for i, item := range doc.Subscriptions {
+		req, verr := createSubscriptionRequestFromBackupItem(item)
+		if verr != nil {
+			return nil, invalidArg(fmt.Sprintf("subscriptions[%d]: %s", i, verr.Message))
+		}
+		requests = append(requests, req)
+	}
+
+	created := make([]SubscriptionResponse, 0, len(requests))
+	for i, req := range requests {
+		createdSub, err := s.CreateSubscription(req)
+		if err != nil {
+			for j := len(created) - 1; j >= 0; j-- {
+				_ = s.DeleteSubscription(created[j].ID)
+			}
+			if svcErr, ok := err.(*ServiceError); ok {
+				return nil, &ServiceError{Code: svcErr.Code, Message: fmt.Sprintf("subscriptions[%d]: %s", i, svcErr.Message), Err: svcErr.Err}
+			}
+			return nil, err
+		}
+		created = append(created, *createdSub)
+	}
+
+	items := make([]SubscriptionBackupItem, 0, len(created))
+	for _, sub := range created {
+		items = append(items, backupItemFromResponse(sub))
+	}
+	slices.SortFunc(items, func(a, b SubscriptionBackupItem) int {
+		return strings.Compare(a.Name+"\x00"+a.URL+"\x00"+a.Content, b.Name+"\x00"+b.URL+"\x00"+b.Content)
+	})
+	return &SubscriptionBackupFile{
+		Version:       subscriptionBackupVersion,
+		ExportedAt:    time.Now().UTC().Format(time.RFC3339Nano),
+		Subscriptions: items,
+	}, nil
+}
+
 // CreateSubscriptionRequest holds create subscription parameters.
 type CreateSubscriptionRequest struct {
 	Name                    *string `json:"name"`
@@ -126,6 +212,7 @@ type CreateSubscriptionRequest struct {
 
 const minSubscriptionUpdateInterval = 30 * time.Second
 const defaultSubscriptionEphemeralNodeEvictDelay = 72 * time.Hour
+const subscriptionBackupVersion = 1
 
 func parseSubscriptionSourceType(raw *string) (string, *ServiceError) {
 	if raw == nil {
@@ -138,6 +225,56 @@ func parseSubscriptionSourceType(raw *string) (string, *ServiceError) {
 	default:
 		return "", invalidArg("source_type: must be remote or local")
 	}
+}
+
+func backupItemFromResponse(sub SubscriptionResponse) SubscriptionBackupItem {
+	return SubscriptionBackupItem{
+		Name:                    sub.Name,
+		SourceType:              sub.SourceType,
+		URL:                     sub.URL,
+		Content:                 sub.Content,
+		UpdateInterval:          sub.UpdateInterval,
+		Enabled:                 sub.Enabled,
+		Ephemeral:               sub.Ephemeral,
+		EphemeralNodeEvictDelay: sub.EphemeralNodeEvictDelay,
+	}
+}
+
+func createSubscriptionRequestFromBackupItem(item SubscriptionBackupItem) (CreateSubscriptionRequest, *ServiceError) {
+	sourceType, verr := parseSubscriptionSourceType(&item.SourceType)
+	if verr != nil {
+		return CreateSubscriptionRequest{}, verr
+	}
+	name := strings.TrimSpace(item.Name)
+	if name == "" {
+		return CreateSubscriptionRequest{}, invalidArg("name is required")
+	}
+	updateInterval := strings.TrimSpace(item.UpdateInterval)
+	if updateInterval == "" {
+		return CreateSubscriptionRequest{}, invalidArg("update_interval is required")
+	}
+	ephemeralNodeEvictDelay := strings.TrimSpace(item.EphemeralNodeEvictDelay)
+	if ephemeralNodeEvictDelay == "" {
+		ephemeralNodeEvictDelay = defaultSubscriptionEphemeralNodeEvictDelay.String()
+	}
+
+	req := CreateSubscriptionRequest{
+		Name:                    &name,
+		SourceType:              &sourceType,
+		UpdateInterval:          &updateInterval,
+		Enabled:                 &item.Enabled,
+		Ephemeral:               &item.Ephemeral,
+		EphemeralNodeEvictDelay: &ephemeralNodeEvictDelay,
+	}
+	switch sourceType {
+	case subscription.SourceTypeRemote:
+		url := strings.TrimSpace(item.URL)
+		req.URL = &url
+	case subscription.SourceTypeLocal:
+		content := item.Content
+		req.Content = &content
+	}
+	return req, nil
 }
 
 // CreateSubscription creates a new subscription.
@@ -389,49 +526,26 @@ func (s *ControlPlaneService) UpdateSubscription(id string, patchJSON json.RawMe
 
 // DeleteSubscription deletes a subscription and evicts its nodes.
 func (s *ControlPlaneService) DeleteSubscription(id string) error {
-	sub := s.SubMgr.Lookup(id)
-	if sub == nil {
-		return notFound("subscription not found")
+	if err := topology.DeleteSubscriptionRuntime(s.Engine, s.SubMgr, s.Pool, id); err != nil {
+		if errors.Is(err, state.ErrNotFound) {
+			return notFound("subscription not found")
+		}
+		return internal("delete subscription", err)
 	}
+	return nil
+}
 
-	var (
-		managedHashes []node.Hash
-		deleteErr     error
-	)
-
-	// Keep delete atomic across persistence + in-memory runtime state:
-	// if DB delete fails, do not mutate runtime subscription/node state.
-	sub.WithOpLock(func() {
-		// Re-check under lock in case another goroutine removed it between
-		// the initial Lookup and lock acquisition.
-		lockedSub := s.SubMgr.Lookup(id)
-		if lockedSub == nil {
-			deleteErr = notFound("subscription not found")
-			return
-		}
-
-		lockedSub.ManagedNodes().RangeNodes(func(h node.Hash, _ subscription.ManagedNode) bool {
-			managedHashes = append(managedHashes, h)
-			return true
-		})
-
-		if err := s.Engine.DeleteSubscription(id); err != nil {
-			if errors.Is(err, state.ErrNotFound) {
-				deleteErr = notFound("subscription not found")
-			} else {
-				deleteErr = internal("delete subscription", err)
+// DeleteSubscriptions deletes multiple subscriptions.
+func (s *ControlPlaneService) DeleteSubscriptions(ids []string) error {
+	for i, id := range ids {
+		if err := s.DeleteSubscription(id); err != nil {
+			if svcErr, ok := err.(*ServiceError); ok {
+				return &ServiceError{Code: svcErr.Code, Message: fmt.Sprintf("subscription_ids[%d]: %s", i, svcErr.Message), Err: svcErr.Err}
 			}
-			return
+			return err
 		}
-
-		// Persist succeeded; now apply in-memory cleanup.
-		for _, h := range managedHashes {
-			s.Pool.RemoveNodeFromSub(h, id)
-		}
-		s.SubMgr.Unregister(id)
-	})
-
-	return deleteErr
+	}
+	return nil
 }
 
 // RefreshSubscription triggers an immediate subscription refresh (blocks).
@@ -495,7 +609,28 @@ func (s *ControlPlaneService) cleanupSubscriptionCircuitOpenNodesWithHook(
 		}
 	}
 
+	s.maybeDeleteEmptySubscriptionAfterCleanup(id)
+
 	return cleanedCount, nil
+}
+
+func (s *ControlPlaneService) maybeDeleteEmptySubscriptionAfterCleanup(id string) {
+	if s == nil || s.RuntimeCfg == nil || s.SubMgr == nil {
+		return
+	}
+	cfg := s.RuntimeCfg.Load()
+	if cfg == nil || !cfg.AutoDeleteEmptySubscriptionsEnabled {
+		return
+	}
+	sub := s.SubMgr.Lookup(id)
+	if sub == nil || !topology.SubscriptionHasNoActiveNodes(sub) {
+		return
+	}
+	if err := topology.DeleteSubscriptionRuntime(s.Engine, s.SubMgr, s.Pool, id); err != nil {
+		if !topology.IsSubscriptionNotFound(err) {
+			log.Printf("[subscription-cleanup] failed to delete empty subscription %s: %v", id, err)
+		}
+	}
 }
 
 func shouldCleanupSubscriptionNode(entry *node.NodeEntry) bool {

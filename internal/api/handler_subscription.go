@@ -2,10 +2,15 @@ package api
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/Resinat/Resin/internal/service"
 )
+
+type deleteSubscriptionsRequest struct {
+	SubscriptionIDs []string `json:"subscription_ids"`
+}
 
 func subscriptionMatchesKeyword(s service.SubscriptionResponse, keyword string) bool {
 	contains := func(v string) bool {
@@ -78,6 +83,36 @@ func HandleListSubscriptions(cp *service.ControlPlaneService) http.HandlerFunc {
 	}
 }
 
+// HandleExportSubscriptions returns a handler for GET /api/v1/subscriptions:export.
+func HandleExportSubscriptions(cp *service.ControlPlaneService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		doc, err := cp.ExportSubscriptions()
+		if err != nil {
+			writeServiceError(w, err)
+			return
+		}
+		w.Header().Set("Content-Disposition", "attachment; filename=\"resin-subscriptions-backup.json\"")
+		WriteJSON(w, http.StatusOK, doc)
+	}
+}
+
+// HandleImportSubscriptions returns a handler for POST /api/v1/subscriptions:import.
+func HandleImportSubscriptions(cp *service.ControlPlaneService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req service.SubscriptionBackupFile
+		if err := DecodeBody(r, &req); err != nil {
+			writeDecodeBodyError(w, err)
+			return
+		}
+		doc, err := cp.ImportSubscriptions(req)
+		if err != nil {
+			writeServiceError(w, err)
+			return
+		}
+		WriteJSON(w, http.StatusOK, doc)
+	}
+}
+
 // HandleGetSubscription returns a handler for GET /api/v1/subscriptions/{id}.
 func HandleGetSubscription(cp *service.ControlPlaneService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -128,6 +163,32 @@ func HandleUpdateSubscription(cp *service.ControlPlaneService) http.HandlerFunc 
 			return
 		}
 		WriteJSON(w, http.StatusOK, s)
+	}
+}
+
+// HandleDeleteSubscriptions returns a handler for DELETE /api/v1/subscriptions.
+func HandleDeleteSubscriptions(cp *service.ControlPlaneService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req deleteSubscriptionsRequest
+		if err := DecodeBody(r, &req); err != nil {
+			writeDecodeBodyError(w, err)
+			return
+		}
+		if len(req.SubscriptionIDs) == 0 {
+			writeInvalidArgument(w, "subscription_ids: must contain at least one id")
+			return
+		}
+		for i, id := range req.SubscriptionIDs {
+			if !ValidateUUID(id) {
+				writeInvalidArgument(w, "subscription_ids["+strconv.Itoa(i)+"]: must be a valid UUID")
+				return
+			}
+		}
+		if err := cp.DeleteSubscriptions(req.SubscriptionIDs); err != nil {
+			writeServiceError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	}
 }
 

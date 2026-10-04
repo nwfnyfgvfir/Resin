@@ -12,8 +12,14 @@ type systemEnvConfigResponse struct {
 	CacheDir                                        string          `json:"cache_dir"`
 	StateDir                                        string          `json:"state_dir"`
 	LogDir                                          string          `json:"log_dir"`
+	PersistenceDialect                              string          `json:"persistence_dialect"`
 	ListenAddress                                   string          `json:"listen_address"`
+	DeploymentProfile                               string          `json:"deployment_profile"`
+	Socks5AdvertiseHost                             string          `json:"socks5_advertise_host"`
+	Socks5SharedOnResinPort                         bool            `json:"socks5_shared_on_resin_port"`
 	ResinPort                                       int             `json:"resin_port"`
+	Socks5Port                                      int             `json:"socks5_port"`
+	EffectiveSocks5Port                             int             `json:"effective_socks5_port"`
 	APIMaxBodyBytes                                 int             `json:"api_max_body_bytes"`
 	MaxLatencyTableEntries                          int             `json:"max_latency_table_entries"`
 	ProbeConcurrency                                int             `json:"probe_concurrency"`
@@ -108,8 +114,19 @@ func systemEnvConfigSnapshot(envCfg *config.EnvConfig) *systemEnvConfigResponse 
 		CacheDir:                              envCfg.CacheDir,
 		StateDir:                              envCfg.StateDir,
 		LogDir:                                envCfg.LogDir,
+		PersistenceDialect:                    envCfg.PersistenceDialect,
 		ListenAddress:                         envCfg.ListenAddress,
+		DeploymentProfile:                     string(envCfg.DeploymentProfile),
+		Socks5AdvertiseHost:                   envCfg.Socks5AdvertiseHost,
+		Socks5SharedOnResinPort:               envCfg.DeploymentProfile.SharesSocks5OnResinPort(),
 		ResinPort:                             envCfg.ResinPort,
+		Socks5Port:                            envCfg.Socks5Port,
+		EffectiveSocks5Port: func() int {
+			if envCfg.DeploymentProfile.SharesSocks5OnResinPort() {
+				return envCfg.ResinPort
+			}
+			return envCfg.Socks5Port
+		}(),
 		APIMaxBodyBytes:                       envCfg.APIMaxBodyBytes,
 		MaxLatencyTableEntries:                envCfg.MaxLatencyTableEntries,
 		ProbeConcurrency:                      envCfg.ProbeConcurrency,

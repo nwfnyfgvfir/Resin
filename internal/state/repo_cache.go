@@ -10,12 +10,17 @@ import (
 
 // CacheRepo wraps cache.db and provides batch read/write for weak-persist data.
 type CacheRepo struct {
-	db *sql.DB
+	db      *sql.DB
+	dialect Dialect
 }
 
 // newCacheRepo creates a CacheRepo for the given cache.db connection.
 func newCacheRepo(db *sql.DB) *CacheRepo {
-	return &CacheRepo{db: db}
+	return newCacheRepoWithDialect(db, DialectSQLite)
+}
+
+func newCacheRepoWithDialect(db *sql.DB, dialect Dialect) *CacheRepo {
+	return &CacheRepo{db: db, dialect: dialect}
 }
 
 // --- nodes_static ---
@@ -48,7 +53,7 @@ func (r *CacheRepo) BulkDeleteNodesStatic(hashes []string) error {
 
 // LoadAllNodesStatic reads all node static records.
 func (r *CacheRepo) LoadAllNodesStatic() ([]model.NodeStatic, error) {
-	rows, err := r.db.Query("SELECT hash, raw_options_json, created_at_ns FROM nodes_static")
+	rows, err := r.query("SELECT hash, raw_options_json, created_at_ns FROM nodes_static")
 	if err != nil {
 		return nil, err
 	}
@@ -107,7 +112,7 @@ func (r *CacheRepo) BulkDeleteNodesDynamic(hashes []string) error {
 
 // LoadAllNodesDynamic reads all node dynamic records.
 func (r *CacheRepo) LoadAllNodesDynamic() ([]model.NodeDynamic, error) {
-	rows, err := r.db.Query(`
+	rows, err := r.query(`
 		SELECT hash, failure_count, circuit_open_since, egress_ip, egress_region, egress_updated_at_ns,
 		       last_latency_probe_attempt_ns, last_authority_latency_probe_attempt_ns, last_egress_update_attempt_ns
 		FROM nodes_dynamic`)
@@ -167,7 +172,7 @@ func (r *CacheRepo) BulkDeleteNodeLatency(keys []model.NodeLatencyKey) error {
 
 // LoadAllNodeLatency reads all node latency records.
 func (r *CacheRepo) LoadAllNodeLatency() ([]model.NodeLatency, error) {
-	rows, err := r.db.Query("SELECT node_hash, domain, ewma_ns, last_updated_ns FROM node_latency")
+	rows, err := r.query("SELECT node_hash, domain, ewma_ns, last_updated_ns FROM node_latency")
 	if err != nil {
 		return nil, err
 	}
@@ -214,7 +219,7 @@ func (r *CacheRepo) BulkDeleteLeases(keys []model.LeaseKey) error {
 
 // LoadAllLeases reads all lease records.
 func (r *CacheRepo) LoadAllLeases() ([]model.Lease, error) {
-	rows, err := r.db.Query("SELECT platform_id, account, node_hash, egress_ip, created_at_ns, expiry_ns, last_accessed_ns FROM leases")
+	rows, err := r.query("SELECT platform_id, account, node_hash, egress_ip, created_at_ns, expiry_ns, last_accessed_ns FROM leases")
 	if err != nil {
 		return nil, err
 	}
@@ -265,7 +270,7 @@ func (r *CacheRepo) BulkDeleteSubscriptionNodes(keys []model.SubscriptionNodeKey
 
 // LoadAllSubscriptionNodes reads all subscription-node links.
 func (r *CacheRepo) LoadAllSubscriptionNodes() ([]model.SubscriptionNode, error) {
-	rows, err := r.db.Query("SELECT subscription_id, node_hash, tags_json, evicted FROM subscription_nodes")
+	rows, err := r.query("SELECT subscription_id, node_hash, tags_json, evicted FROM subscription_nodes")
 	if err != nil {
 		return nil, err
 	}
@@ -286,6 +291,14 @@ func (r *CacheRepo) LoadAllSubscriptionNodes() ([]model.SubscriptionNode, error)
 		result = append(result, sn)
 	}
 	return result, rows.Err()
+}
+
+func (r *CacheRepo) query(query string, args ...any) (*sql.Rows, error) {
+	return r.db.Query(rebindQuery(r.dialect, query), args...)
+}
+
+func (r *CacheRepo) bulkExecTx(tx *sql.Tx, query string, n int, execFn func(stmt *sql.Stmt, i int) error) error {
+	return bulkExecTx(tx, rebindQuery(r.dialect, query), n, execFn)
 }
 
 // --- internal helpers ---
@@ -323,7 +336,7 @@ func (r *CacheRepo) bulkExec(query string, n int, execFn func(stmt *sql.Stmt, i 
 	}
 	defer tx.Rollback()
 
-	if err := bulkExecTx(tx, query, n, execFn); err != nil {
+	if err := r.bulkExecTx(tx, query, n, execFn); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -435,7 +448,7 @@ func (r *CacheRepo) FlushTx(ops FlushOps) error {
 	}
 
 	for _, step := range steps {
-		if err := bulkExecTx(tx, step.query, step.n, step.exec); err != nil {
+		if err := r.bulkExecTx(tx, step.query, step.n, step.exec); err != nil {
 			return fmt.Errorf("%s: %w", step.name, err)
 		}
 	}

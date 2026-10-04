@@ -1,7 +1,10 @@
 package service
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"net/netip"
+	"reflect"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -482,6 +485,57 @@ func TestListNodes_EnabledFilter(t *testing.T) {
 	}
 	if len(nodes) != 1 || nodes[0].NodeHash != disabledHash.Hex() {
 		t.Fatalf("disabled filter result = %+v, want [%s]", nodes, disabledHash.Hex())
+	}
+}
+
+func TestExportNodes_ReturnsBase64WrappedURISubscription(t *testing.T) {
+	subMgr := topology.NewSubscriptionManager()
+	pool := newNodeListTestPool(subMgr)
+
+	sub := subscription.NewSubscription("sub-a", "sub-a", "https://example.com/a", true, false)
+	subMgr.Register(sub)
+
+	rawA := []byte(`{"type":"shadowsocks","tag":"ss-node","server":"1.1.1.1","server_port":8388,"method":"aes-128-gcm","password":"pass"}`)
+	rawB := []byte(`{"type":"trojan","tag":"trojan-node","server":"2.2.2.2","server_port":443,"password":"secret","tls":{"enabled":true,"server_name":"example.com"}}`)
+	hashA := addRoutableNodeForSubscription(t, pool, sub, rawA, "203.0.113.60")
+	hashB := addRoutableNodeForSubscription(t, pool, sub, rawB, "203.0.113.61")
+
+	cp := &ControlPlaneService{
+		Pool:   pool,
+		SubMgr: subMgr,
+	}
+
+	encoded, err := cp.ExportNodes([]string{hashB.Hex(), hashA.Hex()})
+	if err != nil {
+		t.Fatalf("ExportNodes: %v", err)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatalf("export should be base64 text: %v got %q", err, encoded)
+	}
+	nodes, err := subscription.ParseGeneralSubscription(decoded)
+	if err != nil {
+		t.Fatalf("ParseGeneralSubscription(exported): %v text=%s", err, string(decoded))
+	}
+	if len(nodes) != 2 {
+		t.Fatalf("parsed exported nodes len = %d, want 2 text=%s", len(nodes), string(decoded))
+	}
+	assertNodeJSONEqual(t, nodes[0].RawOptions, rawB)
+	assertNodeJSONEqual(t, nodes[1].RawOptions, rawA)
+}
+
+func assertNodeJSONEqual(t *testing.T, got, want []byte) {
+	t.Helper()
+	var gotObj map[string]any
+	if err := json.Unmarshal(got, &gotObj); err != nil {
+		t.Fatalf("unmarshal got node: %v body=%s", err, string(got))
+	}
+	var wantObj map[string]any
+	if err := json.Unmarshal(want, &wantObj); err != nil {
+		t.Fatalf("unmarshal want node: %v body=%s", err, string(want))
+	}
+	if !reflect.DeepEqual(gotObj, wantObj) {
+		t.Fatalf("node mismatch: got=%s want=%s", string(got), string(want))
 	}
 }
 

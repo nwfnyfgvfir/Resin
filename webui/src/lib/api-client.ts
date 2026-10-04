@@ -1,4 +1,4 @@
-import { getStoredAuthToken } from "../features/auth/auth-store";
+import { getStoredAuthToken, handleUnauthorized } from "../features/auth/auth-store";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL?.trim() ?? "";
 
@@ -61,10 +61,16 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
     headers.set("Content-Type", "application/json; charset=utf-8");
   }
 
+  // Track whether the request authenticated with the stored session token (as
+  // opposed to an explicit token, e.g. the login form's validation probe).
+  // Only the former should trigger a global logout on 401.
+  let usedStoredToken = false;
   if (auth) {
-    const resolvedToken = token?.trim() || getStoredAuthToken();
+    const explicitToken = token?.trim() ?? "";
+    const resolvedToken = explicitToken || getStoredAuthToken();
     if (resolvedToken) {
       headers.set("Authorization", `Bearer ${resolvedToken}`);
+      usedStoredToken = explicitToken === "";
     }
   }
 
@@ -79,6 +85,12 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
     const parsed = await parseErrorBody(response);
     const code = parsed?.error?.code ?? "HTTP_ERROR";
     const message = parsed?.error?.message ?? response.statusText;
+    // The stored admin token is no longer valid (e.g. RESIN_ADMIN_TOKEN was
+    // rotated): clear the session and let the app return to the login page
+    // instead of leaving the UI stuck on repeated API errors.
+    if (response.status === 401 && usedStoredToken) {
+      handleUnauthorized();
+    }
     throw new ApiError(response.status, code, message, parsed);
   }
 

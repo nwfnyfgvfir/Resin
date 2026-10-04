@@ -15,17 +15,61 @@ import (
 )
 
 // EnvConfig holds all environment-variable-driven settings (not hot-updatable).
+type DeploymentProfile string
+
+const (
+	DeploymentProfileStandard DeploymentProfile = "STANDARD"
+	DeploymentProfileKoyebTCP DeploymentProfile = "KOYEB_TCP"
+)
+
+func NormalizeDeploymentProfile(raw string) DeploymentProfile {
+	switch strings.ToUpper(strings.TrimSpace(raw)) {
+	case string(DeploymentProfileStandard), "":
+		return DeploymentProfileStandard
+	case string(DeploymentProfileKoyebTCP):
+		return DeploymentProfileKoyebTCP
+	default:
+		return ""
+	}
+}
+
+func (p DeploymentProfile) AllowsSocks5TCP() bool {
+	switch p {
+	case DeploymentProfileStandard, DeploymentProfileKoyebTCP:
+		return true
+	default:
+		return false
+	}
+}
+
+func (p DeploymentProfile) AllowsSocks5UDP() bool {
+	return p == DeploymentProfileStandard
+}
+
+func (p DeploymentProfile) SharesSocks5OnResinPort() bool {
+	return p == DeploymentProfileKoyebTCP
+}
+
 type EnvConfig struct {
 	// Directories
 	CacheDir string
 	StateDir string
 	LogDir   string
 
+	// Persistence
+	PersistenceDialect  string
+	DatabaseURL         string
+	DatabaseMaxOpenConn int
+	DatabaseMaxIdleConn int
+
 	// Network
-	ListenAddress string
+	ListenAddress       string
+	DeploymentProfile   DeploymentProfile
+	Socks5AdvertiseHost string
 
 	// Ports
 	ResinPort       int
+	Socks5Port      int
 	APIMaxBodyBytes int
 
 	// Core
@@ -79,10 +123,19 @@ func LoadEnvConfig() (*EnvConfig, error) {
 	cfg.CacheDir = envStr("RESIN_CACHE_DIR", "/var/cache/resin")
 	cfg.StateDir = envStr("RESIN_STATE_DIR", "/var/lib/resin")
 	cfg.LogDir = envStr("RESIN_LOG_DIR", "/var/log/resin")
+
+	// --- Persistence ---
+	cfg.PersistenceDialect = strings.ToLower(strings.TrimSpace(envStr("RESIN_PERSISTENCE_DIALECT", "sqlite")))
+	cfg.DatabaseURL = strings.TrimSpace(envStr("RESIN_DATABASE_URL", ""))
+	cfg.DatabaseMaxOpenConn = envInt("RESIN_DATABASE_MAX_OPEN_CONNS", 10, &errs)
+	cfg.DatabaseMaxIdleConn = envInt("RESIN_DATABASE_MAX_IDLE_CONNS", 5, &errs)
 	cfg.ListenAddress = strings.TrimSpace(envStr("RESIN_LISTEN_ADDRESS", "0.0.0.0"))
+	cfg.DeploymentProfile = NormalizeDeploymentProfile(envStr("RESIN_DEPLOYMENT_PROFILE", string(DeploymentProfileStandard)))
+	cfg.Socks5AdvertiseHost = strings.TrimSpace(envStr("RESIN_SOCKS5_ADVERTISE_HOST", ""))
 
 	// --- Ports ---
 	cfg.ResinPort = envInt("RESIN_PORT", 2260, &errs)
+	cfg.Socks5Port = envInt("RESIN_SOCKS5_PORT", 0, &errs)
 	cfg.APIMaxBodyBytes = envInt("RESIN_API_MAX_BODY_BYTES", 1<<20, &errs)
 
 	// --- Core ---
@@ -199,11 +252,32 @@ func LoadEnvConfig() (*EnvConfig, error) {
 			errs = append(errs, "RESIN_PROXY_TOKEN must not be reserved keyword: api, healthz, ui")
 		}
 	}
+	if cfg.PersistenceDialect != "sqlite" && cfg.PersistenceDialect != "postgres" {
+		errs = append(errs, fmt.Sprintf("RESIN_PERSISTENCE_DIALECT: invalid value %q (allowed: sqlite, postgres)", cfg.PersistenceDialect))
+	}
+	if cfg.PersistenceDialect == "postgres" && cfg.DatabaseURL == "" {
+		errs = append(errs, "RESIN_DATABASE_URL must be defined when RESIN_PERSISTENCE_DIALECT=postgres")
+	}
+	if cfg.DatabaseMaxOpenConn <= 0 {
+		errs = append(errs, "RESIN_DATABASE_MAX_OPEN_CONNS must be > 0")
+	}
+	if cfg.DatabaseMaxIdleConn < 0 {
+		errs = append(errs, "RESIN_DATABASE_MAX_IDLE_CONNS must be >= 0")
+	}
 	if cfg.ListenAddress == "" {
 		errs = append(errs, "RESIN_LISTEN_ADDRESS must not be empty")
 	}
+	if cfg.DeploymentProfile == "" {
+		errs = append(errs, fmt.Sprintf("RESIN_DEPLOYMENT_PROFILE: invalid value %q (allowed: %s, %s)", envStr("RESIN_DEPLOYMENT_PROFILE", string(DeploymentProfileStandard)), DeploymentProfileStandard, DeploymentProfileKoyebTCP))
+	}
 
 	validatePort("RESIN_PORT", cfg.ResinPort, &errs)
+	if cfg.Socks5Port < 0 || cfg.Socks5Port > 65535 {
+		errs = append(errs, fmt.Sprintf("RESIN_SOCKS5_PORT: port must be 0-65535, got %d", cfg.Socks5Port))
+	}
+	if cfg.DeploymentProfile.SharesSocks5OnResinPort() && cfg.Socks5Port != 0 && cfg.Socks5Port != cfg.ResinPort {
+		errs = append(errs, fmt.Sprintf("RESIN_SOCKS5_PORT must be 0 or match RESIN_PORT when RESIN_DEPLOYMENT_PROFILE=%s", cfg.DeploymentProfile))
+	}
 	validatePositive("RESIN_API_MAX_BODY_BYTES", cfg.APIMaxBodyBytes, &errs)
 
 	validatePositive("RESIN_MAX_LATENCY_TABLE_ENTRIES", cfg.MaxLatencyTableEntries, &errs)
