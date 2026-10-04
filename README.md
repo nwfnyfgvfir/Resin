@@ -1,11 +1,9 @@
-[English](README.md) | [简体中文](README.zh-CN.md)
-
 # 基于 https://github.com/Resinat/Resin 二开
 
 <div align="center">
   <img src="webui/public/vite.svg" width="48" alt="Resin Logo" />
   <h1>Resin</h1>
-  <p><strong>Turn massive proxy subscriptions into a stable, smart, observable unified proxy entrypoint with sticky sessions.</strong></p>
+  <p><strong>将大量的代理订阅转化为一个稳定、智能、可观测且支持会话保持的统一代理入口。</strong></p>
 </div>
 
 <p align="center">
@@ -20,63 +18,64 @@
 
 ---
 
-**Resin** is a **high-performance intelligent proxy pool gateway** built for operating massive numbers of proxy nodes.
+> 本仓库是 [Resinat/Resin](https://github.com/Resinat/Resin) 的**二开版本**，已同步上游 `master` 并保留本仓库自研能力，额外提供 **PostgreSQL 持久化**（见下文「持久化」章节）。
 
-It helps shield your services from unstable upstream proxies and aggregates them into a single gateway surface with **session stickiness (sticky routing)** across HTTP and optional SOCKS5 access.
-It helps shield your services from unstable underlying proxy nodes by aggregating distributed proxy resources into a unified proxy entrypoint with **session stickiness (sticky routing)**.
+**Resin** 是一个专为接管海量节点设计的**高性能智能代理池网关**。
 
-## 💡 Why Resin?
+它用于在上层屏蔽底层代理节点的不稳定性，将分散节点聚合为一个支持 **“会话保持（粘性路由）”** 的统一代理入口，同时支持 HTTP 与 SOCKS5 入站。
 
-- **Massive-scale management**: Easily handles 100k+ proxy nodes with native high-concurrency performance.
-- **Smart scheduling and circuit breaking**: Fully automated **passive + active** health checks, outbound IP probing, and latency analysis to remove bad nodes precisely. Uses P2C plus domain-aware latency-weighted scoring for optimal node selection.
-- **Business-friendly sticky proxying**: Keeps the same business account bound to a stable outbound IP. If a node fails, Resin seamlessly switches to another node with the same IP.
-- **Multiple access modes**: Supports standard forward proxy (HTTP Proxy), SOCKS5 inbound, and URL-based reverse proxy.
-- **Multiple access modes**: Supports HTTP forward proxy, SOCKS5 forward proxy, and URL-based reverse proxy for different clients and integration styles.
-- **Multiple inbound endpoints**: Add hot-reloaded listening ports in the WebUI and independently control admin-console, HTTP forward, HTTP reverse, and SOCKS5 access on each port.
-- **Observability**: Detailed metrics and logs, plus a visual Web UI. Includes complete structured request logs for querying and auditing by platform, account, target site, and more.
-- **Simple and powerful**: Works out of the box with default settings, while still offering deep customization for enterprise-grade needs.
-- **Cross-subscription deduplication**: Automatically merges identical nodes from different subscriptions and shares their health state.
-- **Hot reload**: Update common settings without restart. Refresh subscriptions without dropping existing traffic.
-- **Persistent state**: Keeps node health, latency stats, and lease bindings across restarts.
-- **Zero-intrusion sticky access**: Can extract account identity from existing request headers (for example API keys), so clients often need no code changes.
-- **Incremental subscription refresh**: Syncs subscription updates without interrupting current connections.
-- **Flexible node isolation**: Use Platform rules (regex, region, etc.) to build independent proxy pools for different business scenarios.
+## 💡 为什么选择 Resin？
+
+- **海量接管**：轻松管理十万级规模的代理节点。高性能，原生支持高并发。
+- **智能调度与熔断**：全自动的 **被动+主动** 健康探测、出口 IP 探测、延迟分析，精准剔除坏节点。采用 P2C 算法结合按域名的延迟加权评分，智能选择最优节点。
+- **业务友好的粘性代理**：让同一业务账号优先绑定同一出口 IP，节点异常时自动切换同 IP 节点，在多数场景下减少业务波动。
+- **多种接入方式**：同时支持 HTTP 正向代理、SOCKS5 正向代理与 URL 反向代理，适配不同客户端与集成形态。
+- **多接入点管理**：可在 WebUI 热添加监听端口，并分别控制每个端口是否开放管理页面、HTTP 正向代理、HTTP 反向代理和 SOCKS5。
+- **可观测性**：提供详细的性能指标与日志记录，快速掌控全局（可视化 Web 管理后台）。包括完整的结构化请求日志，支持按平台、账号、目标站点等维度查询与审计。
+- **简单与强大兼得**：开箱即用的默认配置与深度自定义功能。无论你是只需几分钟跑通简单场景的个人使用者，还是需要高并发与高可用性的企业级团队，Resin 都能游刃有余。
+- **跨订阅智能去重**：不同订阅中配置相同的节点自动合并，共享健康状态，避免重复探测。
+- **热更新**：更新常用配置不用重启，更新订阅节点不断连。
+- **状态持久化**：重启后仍可恢复节点健康数据、延迟统计与租约绑定，便于生产环境连续运行与故障恢复。
+- **零侵入粘性接入**：支持从业务原有请求头（如 API Key）自动提取账号身份，在常见接入方式下可尽量减少代码改动。
+- **订阅热更新**：节点订阅刷新时增量同步，不中断现有连接。
+- **灵活的节点隔离**：通过 Platform 概念，按正则表达式、地区等规则筛选节点，为不同业务构建独立的代理池。
+- **PostgreSQL 持久化（本仓库增强）**：除默认的 SQLite 外，核心 `state` / `cache` 可切换到 PostgreSQL，便于集中运维与多实例部署。
 
 > [!TIP]
-> You can feed this README and [`DESIGN.md`](DESIGN.md) to AI and ask it anything about the project.
+> 您可以把本文档与项目详细设计文档 [`DESIGN.md`](DESIGN.md) 丢给 AI，然后问它任何你感兴趣的问题！
 
-![](doc/images/dashboard_en-us.png)
+![](doc/images/dashboard_zh-cn.png)
 
 ---
 
-## 🔌 Supported Protocols and Subscription Formats
+## 🔌 支持协议与订阅格式
 
-### Subscription sources
+### 订阅来源
 
-- Remote subscription URL: `http://` or `https://`.
-- Local subscription content: paste subscription content directly in the UI/API.
+- 远程订阅 URL：`http://` 或 `https://`。
+- 本地订阅内容：在 UI/API 中直接粘贴订阅内容。
 
-### Subscription content formats
+### 订阅内容格式
 
-- sing-box JSON: `{"outbounds":[...]}` or raw outbound array `[...]`.
-- Clash JSON/YAML: `{"proxies":[...]}` or YAML `proxies:`.
-- URI line format (one node per line): `vmess://`, `vless://`, `trojan://`, `ss://`, `hysteria2://`, `http://`, `https://`, `socks5://`, `socks5h://`.
-  For `http://`, `https://`, `socks5://`, `socks5h://`, use `scheme://[user:pass@]host:port` (optional `#tag`; `https` also supports `sni`/`servername`/`peer` and `allowInsecure`/`insecure` query parameters).
-- Plain HTTP proxy lines: `IP:PORT` or `IP:PORT:USER:PASS` (IPv4 and IPv6).
-- Base64-wrapped text subscriptions (for URI lines/plain-text node lists).
+- sing-box JSON：`{"outbounds":[...]}` 或原始出站数组 `[...]`。
+- Clash JSON/YAML：`{"proxies":[...]}` 或 YAML `proxies:`。
+- URI 行格式（每行一个节点）：`vmess://`、`vless://`、`trojan://`、`ss://`、`hysteria2://`、`http://`、`https://`、`socks5://`、`socks5h://`。
+  其中 `http://`、`https://`、`socks5://`、`socks5h://` 需使用 `scheme://[user:pass@]host:port` 形式（可选 `#tag`；`https` 额外支持 `sni`/`servername`/`peer` 与 `allowInsecure`/`insecure` 查询参数）。
+- 纯 HTTP 代理行：`IP:PORT` 或 `IP:PORT:USER:PASS`（支持 IPv4 和 IPv6）。
+- Base64 包裹的文本订阅（例如 URI 行或纯文本节点列表）。
 
-### Supported outbound node types
+### 支持的出站节点协议类型
 
-- For sing-box JSON/raw outbounds: `socks`, `http`, `shadowsocks`, `vmess`, `trojan`, `wireguard`, `hysteria`, `vless`, `shadowtls`, `tuic`, `hysteria2`, `anytls`, `ssh`.
-- For Clash conversion: `ss`/`shadowsocks`, `socks`/`socks4`/`socks4a`/`socks5`, `http`, `vmess`, `vless`, `trojan`, `wireguard`/`wg`, `hysteria`, `hysteria2`/`hy2`, `tuic`, `anytls`, `ssh`.
+- 对于 sing-box JSON/原始 outbounds：`socks`、`http`、`shadowsocks`、`vmess`、`trojan`、`wireguard`、`hysteria`、`vless`、`shadowtls`、`tuic`、`hysteria2`、`anytls`、`ssh`。
+- 对于 Clash 转换：`ss`/`shadowsocks`、`socks`/`socks4`/`socks4a`/`socks5`、`http`、`vmess`、`vless`、`trojan`、`wireguard`/`wg`、`hysteria`、`hysteria2`/`hy2`、`tuic`、`anytls`、`ssh`。
 
-## 🚀 Quick Start
+## 🚀 快速开始
 
-In just three steps, you can turn your proxy subscriptions into a highly available proxy pool.
+只需简单三步，即可将你的节点订阅转化为高可用代理池。
 
-### Step 1: Deploy and start
+### 第一步：一键部署启动
 
-Docker Compose is the recommended quick-start path:
+推荐使用 Docker Compose 快速启动：
 
 ```yaml
 # docker-compose.yml
@@ -86,8 +85,8 @@ services:
     container_name: resin
     restart: unless-stopped
     environment:
-      RESIN_ADMIN_TOKEN: "admin123" # Change to your admin dashboard password
-      RESIN_PROXY_TOKEN: "my-token" # Change to your proxy password
+      RESIN_ADMIN_TOKEN: "admin123" # 修改为你的管理后台密码
+      RESIN_PROXY_TOKEN: "my-token" # 修改为你的代理密码
       RESIN_LISTEN_ADDRESS: 0.0.0.0
       RESIN_PORT: 2260
     ports:
@@ -98,63 +97,69 @@ services:
       - ./data/log:/var/log/resin
 ```
 
-Run `docker compose up -d` to start the service.
+运行 `docker compose up -d` 启动服务。
 
-Inbound access is managed by **endpoints**. The default endpoint listens on `RESIN_PORT` and serves the admin console, HTTP forward proxy, HTTP reverse proxy, and SOCKS5 on the same port. Additional listening ports can be added from the WebUI (**Endpoints**), each independently enabling admin / HTTP-forward / HTTP-reverse / SOCKS5 access. When running in Docker, pre-publish the ports you intend to use.
+入站接入由**接入点（endpoints）**管理。默认接入点监听 `RESIN_PORT`，在同一个端口上同时提供管理页面、HTTP 正向代理、HTTP 反向代理与 SOCKS5。可以在 WebUI 的**接入点**页面新增监听端口，并为每个端口独立开启 管理 / HTTP 正向 / HTTP 反向 / SOCKS5 能力。
 
-SOCKS5 authentication reuses `RESIN_AUTH_VERSION` and `RESIN_PROXY_TOKEN`. For example, in `V1` mode, clients can use usernames like `Platform.Account` with password `RESIN_PROXY_TOKEN`.
+自定义接入点端口还必须能从容器外访问。Docker 无法为已运行容器动态增加端口映射，因此请在 `ports` 中提前映射所需端口范围（例如 `"2300-2399:2300-2399"`），或在适合的环境中使用 host 网络。
 
-By default, Resin uses local SQLite files for persistence. To switch core state/cache persistence to PostgreSQL, set:
+SOCKS5 认证复用 `RESIN_AUTH_VERSION` 与 `RESIN_PROXY_TOKEN`。例如在 `V1` 模式下，客户端可以使用 `Platform.Account` 作为用户名、`RESIN_PROXY_TOKEN` 作为密码。
+
+#### 持久化
+
+默认情况下，Resin 使用本地 SQLite 文件持久化。若要将核心 `state/cache` 持久化切换到 PostgreSQL，请设置：
 
 ```bash
 RESIN_PERSISTENCE_DIALECT=postgres
 RESIN_DATABASE_URL=postgres://user:pass@host:5432/resin?sslmode=disable
 ```
 
-Optional connection-pool settings:
+可选连接池参数：
 
 ```bash
 RESIN_DATABASE_MAX_OPEN_CONNS=10
 RESIN_DATABASE_MAX_IDLE_CONNS=5
 ```
 
-Current scope of PostgreSQL persistence:
-- migrated: core `state` + `cache`
-- not yet migrated: `metrics.db` and rolling `request_logs-*.db`
+当前 PostgreSQL 持久化范围：
 
-The admin panel now shows the active database type so you can verify whether the process is running with SQLite or PostgreSQL.
-Custom endpoint ports must also be reachable from outside the container. Docker cannot add published ports to an already-running container, so pre-publish the required port range in `ports` (for example `"2300-2399:2300-2399"`) or use host networking where appropriate.
+- 已迁移：核心 `state` + `cache`
+- 尚未迁移：`metrics.db` 与滚动分片 `request_logs-*.db`
 
-*(If you don't want Docker, jump to [Other Deployment Options](#other-deployment-options).)*
+管理面板会显示当前数据库类型，便于确认进程实际运行在 SQLite 还是 PostgreSQL 模式。
 
-### Step 2: Import proxy nodes
+*(如果你不想使用 Docker，请跳转文末查看 [其他部署方式](#其他部署方式))*
 
-1. Open `http://127.0.0.1:2260` in your browser (replace with your server IP if needed).
-2. Log in with the `RESIN_ADMIN_TOKEN` you set.
-3. Go to **Subscriptions** in the left menu and add your node subscription.
-4. Wait briefly for the node pool to refresh.
+### 第二步：导入代理节点
+
+1. 浏览器打开 `http://127.0.0.1:2260`（请替换为你的服务器 IP）。
+2. 输入刚才设置的 `RESIN_ADMIN_TOKEN` 登录后台。
+3. 在左侧菜单找到 **「订阅管理」**，添加你的节点订阅。
+4. 稍等片刻，等待节点池刷新出你的节点。
 
 > [!NOTE]
-> Related Web UI actions:
-> - The **Subscriptions** page supports selecting multiple subscriptions and deleting them in one action.
-> - Subscription backups can be exported, and importing a backup **appends** its subscriptions to the current list instead of deleting existing ones.
-> - The **Node Pool** page lets you select one or more nodes and export them as subscription-link text that can be imported directly by clients such as v2ray, v2rayN, and Clash Meta.
+> 管理面板中的相关操作：
+> - **「订阅管理」** 页面支持勾选多条订阅并批量删除。
+> - 支持导出订阅备份；导入订阅备份时会**追加**到当前列表，不会删除已有订阅。
+> - **「节点池」** 页面支持单选或多选节点，并将选中的节点导出为可直接导入 v2ray、v2rayN、Clash Meta 等客户端的订阅链接文本。
 
-### Step 3: Start sending proxy requests
+### 第三步：开始你的代理请求
 
-See the following sections for client access modes. In common scenarios, you can choose HTTP forward proxy, SOCKS5 forward proxy, or reverse proxy based on what your client supports.
+客户端接入方式参考接下来的章节。常见场景下，你可以按客户端能力选择 HTTP 正向代理、SOCKS5 正向代理或反向代理。
 
-## 🟢 Basic Usage (Non-sticky Proxy)
+## 🟢 基础使用（非粘性代理）
 
-### Connect as a standard proxy
+### 简单接入代理
 
-If you just need a high-performance, large-capacity proxy pool with automatic health management, Resin works out of the box.
+如果你只需要一个高性能、大容量、且会自动健康管理的通用代理池，Resin 开箱即用。
 
-Once Resin is running, you can choose HTTP forward proxy, SOCKS5 forward proxy, or reverse proxy based on what your client supports.
-If you do not want a proxy password, explicitly set `RESIN_PROXY_TOKEN=""` (the variable must still be defined). Then HTTP forward proxy is available at `http://127.0.0.1:2260`, and SOCKS5 forward proxy is available at `socks5://127.0.0.1:2260`.
-For binary/source runs, Resin also loads a `.env` file from the current working directory before reading configuration. Environment variables already set by the OS or shell take precedence over `.env` values.
+启动 Resin 服务后，你可以按客户端能力选择 HTTP 正向代理、SOCKS5 正向代理或反向代理接入。
 
-HTTP forward proxy example:
+如果你不想设置代理密码，请将环境变量显式设为空字符串：`RESIN_PROXY_TOKEN=""`（变量必须定义）。此时 HTTP 正向代理可直接接入 `http://127.0.0.1:2260`，SOCKS5 正向代理可直接接入 `socks5://127.0.0.1:2260`。
+
+通过二进制文件或源码运行时，Resin 也会在读取配置前自动加载当前工作目录下的 `.env` 文件；已经由系统或 shell 设置的环境变量优先级高于 `.env`。
+
+HTTP 正向代理例子：
 
 ```bash
 curl -x http://127.0.0.1:2260 \
@@ -162,59 +167,48 @@ curl -x http://127.0.0.1:2260 \
   https://api.ipify.org
 ```
 
-If your client supports SOCKS5, you can also connect through SOCKS5 on the same port:
+如果你的客户端支持 SOCKS5，也可以在同一个端口上通过 SOCKS5 接入：
 
 ```bash
 curl --proxy socks5h://127.0.0.1:2260 \
-  --proxy-user "Default.user_tom:my-token" \
+  -U "Default.user_tom:my-token" \
   https://api.ipify.org
 ```
 
-When `RESIN_AUTH_VERSION=V1`, the SOCKS5 username follows the same `Platform.Account` convention as HTTP forward proxy. When `RESIN_PROXY_TOKEN=""`, Resin still accepts unauthenticated SOCKS5 clients and, if the client offers username/password auth, will parse the username as optional identity.
-SOCKS5 forward proxy example:
+当 `RESIN_AUTH_VERSION=V1` 时，SOCKS5 用户名沿用与 HTTP 正向代理相同的 `Platform.Account` 规则。当 `RESIN_PROXY_TOKEN=""` 时，Resin 仍然接受无密码 SOCKS5 客户端；如果客户端主动提供用户名/密码认证，Resin 也会把用户名解析为可选身份信息。
 
-```bash
-curl --proxy socks5h://127.0.0.1:2260 \
-  -U "Default:my-token" \
-  https://api.ipify.org
-```
-
-When `RESIN_PROXY_TOKEN=""`, SOCKS5 also allows unauthenticated access.
-
-If your client supports overriding `BASE_URL`, you can also use reverse-proxy mode.
-URL format: `/token/Platform(optional).Account(optional)/protocol/target`.
-Example request to `https://api.ipify.org`:
+如果你的客户端支持修改服务的 `BASE_URL`，你也可以尝试反向代理接入。URL 格式为：`/令牌/Platform(可选).Account(可选)/协议/目标地址`。例如，你可以通过下面的 curl 命令通过 Resin 访问 `https://api.ipify.org`。
 
 ```bash
 curl http://127.0.0.1:2260/my-token/./https/api.ipify.org
 ```
 
-> Choosing forward vs reverse proxy: when possible, reverse proxy is recommended for better observability. If your client cannot change BaseURL, or requires scenarios better served by forward proxy (such as uTLS or non-WebAPI traffic), use forward proxy.
+> 正向代理与反向代理的选择：如果条件允许，推荐尽量使用反向代理，对于可观测性更友好。如果您的客户端不支持修改 BaseURL，或者客户端需要 utls、非纯 WebAPI 请求这种反向代理不擅长的情况，请使用正向代理。
 
-### Filter nodes
+### 筛选节点
 
-If your service needs specific nodes (for example by region, subscription source, or name regex), use Resin's Platform feature.
+如果你的服务对节点有筛选要求，例如只需要某个地区的节点，或者只需要来自某个订阅源的节点，或者只需要名字匹配特定正则表达式的节点，可以使用 Resin 的 Platform 概念来实现。
 
-Open `http://127.0.0.1:2260/ui/platforms` and create a Platform. For example, to use only US and HK nodes, create `MyPlatform` and set region filters to:
+你可以打开 `http://127.0.0.1:2260/ui/platforms` Platform 管理页面，创建一个 Platform。例如希望只使用来自美国、香港的节点，你可以创建一个名为 “MyPlatform” 的 Platform，然后在地区过滤规则中填入：
 
 ```
 us
 hk
 ```
 
-Node tag rules match `<SubscriptionName>/<NodeTag>`, with one regular expression per line. Plain rules are ORed, a leading `*` marks a required rule, and a leading `!` excludes a node on any match. For example, this selects dedicated Hong Kong or Japan nodes while excluding expired and invalid nodes:
+节点标签规则匹配 `<订阅名>/<节点标签>`，每行是一条正则表达式：普通规则之间为 OR，`*` 开头表示必须命中，`!` 开头表示命中即排除。例如下面表示选择香港或日本的专线节点，同时排除带有“过期”或者“失效”标签的节点：
 
 ```text
-Hong Kong
-Japan
-*Dedicated
-!Expired
-!Invalid
+香港
+日本
+*专线
+!过期
+!失效
 ```
 
-Only the first character is interpreted as a rule prefix; the rest remains a Go regular expression. Escape a literal leading `!` as `\!`.
+规则前缀只识别每行的第一个字符，其余内容仍是 Go 正则表达式。需要匹配字面量行首 `!` 时可以写成 `\!`。
 
-For forward proxy (HTTP / SOCKS5), include Platform in the auth info. Examples:
+对于正向代理（HTTP / SOCKS5），你可以在认证信息中填入希望使用的 Platform。下面分别给出一个 curl 例子：
 
 ```bash
 curl -x http://127.0.0.1:2260 \
@@ -228,133 +222,132 @@ curl --proxy socks5h://127.0.0.1:2260 \
   https://api.ipify.org
 ```
 
-For reverse proxy, include Platform in the URL prefix:
+对于反向代理，你可以在 URL 前缀中提供 Platform 信息。下面是一个使用 curl 的例子：
 
-```bash
+```
 curl http://127.0.0.1:2260/my-token/MyPlatform/https/api.ipify.org
 ```
 
-## 📖 Advanced Usage: Sticky Session Proxy
+## 📖 进阶使用：粘性代理
 
-When your business depends on IP continuity or long-lived interactions, use Resin's core feature: **sticky proxying**.
+当业务遇到**对 IP 变化敏感**的服务，或者需要持续交互时，你需要使用 Resin 的核心特性：**粘性代理**。
 
-First, understand two core concepts:
+在此之前，先了解两个概念：
 
-### 🎯 Core Concepts: Platform and Account
+### 🎯 核心概念：平台 (Platform) 与 账号 (Account)
 
-- **Platform**: An isolated node pool. You can build it with filters (for example, only US nodes). Resin provides a default `Default` platform containing all available nodes.
-- **Account**: A unique business identity (for example `Tom` or `user_1`). For requests carrying an Account, Resin anchors traffic to a dedicated high-quality outbound node. If that node fails, Resin retries seamlessly and switches to another node with the same IP.
+- **平台 (Platform)**：节点的隔离池。你可以通过规则筛选节点（例如只使用“美国”节点）组建成一个专有池。系统默认存在一个装载所有可用节点的 `Default` 平台。
+- **账号 (Account)**：业务侧的唯一标识（如 `Tom` 或 `user_1`）。携带特定 Account 的请求，Resin 会优先为其分配稳定的出口节点；当节点不可用时，会重试并优先切换到同 IP 节点，以降低业务侧适配成本。
 
-### Sticky proxy access formats
+### 粘性代理接入格式
 
-#### Method 1: Forward proxy (HTTP Proxy / SOCKS5)
+#### 方式一：正向代理接入（HTTP Proxy / SOCKS5）
 
-HTTP forward proxy and SOCKS5 forward proxy share the same identity format: `Platform.Account:RESIN_PROXY_TOKEN`.
+HTTP 正向代理与 SOCKS5 正向代理共用同一套身份格式：`Platform.Account:RESIN_PROXY_TOKEN`。
 
-Just put the identity in proxy authentication:
+直接将身份信息写入代理认证中即可：
 
 ```bash
-# HTTP forward proxy: bind business account user_tom to a stable dedicated outbound IP
+# HTTP 正向代理：指定业务账号 user_tom，Resin 会为其长期分配一个稳定的专属 IP
 curl -x http://127.0.0.1:2260 \
   -U "Default.user_tom:my-token" \
   https://api.ipify.org
 ```
 
 ```bash
-# SOCKS5 forward proxy: uses the same identity format as HTTP forward proxy
+# SOCKS5 正向代理：身份格式与 HTTP 正向代理保持一致
 curl --proxy socks5h://127.0.0.1:2260 \
   -U "Default.user_tom:my-token" \
   https://api.ipify.org
 ```
 
-#### Method 2: Reverse proxy (URL Account, quick/manual debug)
+#### 方式二：反向代理接入（URL 携带 Account，适合简单使用/手动调试）
 
-By replacing your service BaseURL with Resin reverse-proxy URL, traffic goes through Resin directly.
-Advanced URL format: `http://host:2260/token/platform.account/protocol/target`:
+你可以通过替换业务的 BaseURL 为 Resin 反代地址，将请求直接发给 Resin。
+URL 格式进阶为：`http://部署IP:2260/密码/平台.账号/协议/目标地址`：
 
 ```bash
-# Example: user_tom accesses api.ipify.org over https
+# 例如让 user_tom 访问 https 协议的 api.ipify.org：
 curl "http://127.0.0.1:2260/my-token/Default.user_tom/https/api.ipify.org"
 ```
 
-> The URL Account segment is designed for quick use and manual debugging.
-> For long-running production integrations, prefer passing Account by header (`X-Resin-Account`).
+> URL 中携带 Account 的模式定位是“简单使用 / 手动调试”。
+> 生产环境长期集成，推荐优先使用请求头 `X-Resin-Account` 传递 Account。
 
-#### Method 3: Reverse proxy + `X-Resin-Account` header (recommended production integration)
+#### 方式三：反向代理接入 + `X-Resin-Account` 请求头（推荐正式集成）
 
-If your client/SDK supports custom request headers, pass Account explicitly with `X-Resin-Account`.
-This is the recommended and most stable method.
+如果你的客户端（或 SDK）支持自定义请求头，建议直接使用 `X-Resin-Account` 显式传递 Account，这是最稳定的方式。
 
-Account source priority: `X-Resin-Account` header > Account in reverse-proxy URL > header extraction rules.
+Account 来源优先级：`X-Resin-Account` 请求头 > 反向代理 URL 中的 Account > 请求头提取规则。
 
-Example:
+示例：
 
 ```bash
 curl "http://127.0.0.1:2260/my-token/MyPlatform/https/api.example.com/v1/orders" \
   -H "X-Resin-Account: user_tom"
 ```
 
-#### Method 4: Reverse proxy + header rules (zero/low-intrusion integration)
+#### 方式四：反向代理接入 + 请求头规则（零侵入/低侵入集成）
 
-If your client cannot set `X-Resin-Account`, Resin can still extract Account from existing business headers (for example API Key, Token, Cookie) via header rules.
+如果你的客户端不方便设置 `X-Resin-Account`，但业务请求本身已经有稳定身份头（例如发给目标网站的 API Key、Token、Cookie 等），Resin 也可以通过“请求头提取规则”自动提取 Account。
 
-Assume your requests already include an `Authorization` header:
+假设你的服务本来每次请求目标 API 时，都会携带 `Authorization` 请求头：
 
-1. In Platform Configuration, set `Reverse-proxy empty-account behavior` to `Extract specified request headers as Account`.
-2. Set `Headers used to extract Account` to `Authorization`.
+1. 在管理页面修改 Platform 的配置，把 “反向代理账号为空行为” 修改为 “提取指定请求头作为 Account”。
+2. 在 “用于提取 Account 的 Headers” 输入 `Authorization`。
 
-Then even if Account is omitted in URL, Resin can still parse it from headers:
+此时，就算你在反向代理 URL 里不填 `Account`，Resin 也会在流量经过时读取并解析该 Header。例如：
 
 ```bash
 curl "http://127.0.0.1:2260/my-token/MyPlatform/https/api.example.com/v1/orders" \
   -H "Authorization: sk-abc123"
 ```
 
-In this example, Resin uses `sk-abc123` as Account. Future requests with the same key are intended to stay bound to the same outbound IP whenever routing conditions allow.
+上面的请求中，Resin 发现 sk-abc123 后，会将其作为 Account。后续只要带着同一把 API Key 的请求，会优先保持在同一个出口 IP 上。
 
 > [!TIP]
-> Beyond Platform header config, Resin also supports advanced rules that pick extraction headers by URL prefix. You can ask AI to explain both modes with this README and [DESIGN.md](DESIGN.md).
+> 除了 Platform 请求头配置外，Resin 还支持更高级的根据 URL 前缀决定请求头的高级功能！尝试把当前文档与 [DESIGN.md](DESIGN.md) 扔给 AI，问它 “请使用简单易懂的语言，向我介绍 Resin 指定请求头提取规则的两种方式，尤其是根据 URL 前缀决定请求头的方式。”
 
-> Enable header-based Account extraction only when you have a valid legal basis (for example user authorization or contractual permission), and ensure your logging, retention, and access-control policies comply with applicable laws and target-service terms.
+> 请仅在具备合法处理依据（如用户授权、合同约定或其他适用法律基础）时启用请求头提取，并确保你的日志留存与访问控制策略符合所在地法律法规及目标服务条款。
 
 ---
 
-## 🤖 Integrating Third-party Projects
+## 🤖 接入第三方项目
 
-Different clients integrate Resin differently, with different code-intrusion levels.
+各类第三方客户端使用 Resin 的方式有所不同，对于业务代码的侵入程度也不同，总结如下：
 
-💡 **If you do not need sticky proxying**
+💡 **如果你不需要粘性代理**
 
-| Access Method | Code Intrusion | Notes |
+| 接入方式 | 代码侵入程度 | 说明 |
 | :--- | :--- | :--- |
-| Forward proxy | 🟢 **Zero intrusion** | Just configure an HTTP or SOCKS5 proxy address plus credentials. |
-| Reverse proxy | 🟢 **Zero/low intrusion** | Usually only requires changing service BaseURL. |
+| 接入正向代理 | 🟢 **零侵入** | 客户端填入 HTTP 或 SOCKS5 代理地址及认证信息即可。 |
+| 接入反向代理 | 🟢 **零/低侵入** | 修改服务 BaseURL 即可接入，适配极易。 |
 
-💡 **If you need sticky proxying**
+💡 **如果你需要粘性代理**
 
-| Access Method | Code Intrusion | Notes |
+| 接入方式 | 代码侵入程度 | 说明 |
 | :--- | :--- | :--- |
-| Forward proxy | 🟡 **Medium intrusion** | Per-user requests need different auth info. Both HTTP and SOCKS5 use `platform.account:token`. |
-| Reverse proxy | 🟡 **Medium intrusion** | Add `X-Resin-Account` request header or build reverse-proxy URL paths dynamically with account information. |
-| Reverse proxy + header rules | 🟢 **Zero/low intrusion** | Resin can extract Account from original headers (for example `Authorization`) and bind IP automatically. |
+| 接入正向代理 | 🟡 **中侵入** | 需稍微修改代码：为不同用户附带不同认证信息。HTTP 与 SOCKS5 都可使用 `平台.账号:密码`。 |
+| 接入反向代理 | 🟡 **中侵入** | 需稍微修改代码：加入 `X-Resin-Account` 请求头或动态拼接带有账号的反代 URL 路径。 |
+| 接入反向代理 + 请求头规则 | 🟢 **零/低侵入** | Resin 允许通过识别业务原始头（如 `Authorization`）自动提取 Account 并进行粘性路由绑定，接入方式与非粘性反代接近。 |
 
-👉 **Fast integration script/prompt:**
-If you are a developer and want AI to help modify an existing project for native Resin sticky integration, use:
+👉 **极速集成脚本/提示词（Prompt）：**
+如果你是开发者，想要修改现有项目原生接入 Resin 粘性代理，你可以直接把下面这个模板喂给 AI 帮你写代码：
 
 - [doc/integration-prompt.md](doc/integration-prompt.md)
 
 ---
 
-## Other Deployment Options
+## 其他部署方式
 
 <details>
-<summary><b>Option 1: Run prebuilt binary</b></summary>
+<summary><b>方式一：运行预编译二进制文件</b></summary>
 <br>
-Go to the project's <a href="https://github.com/Resinat/Resin/releases">Release</a> page and download the package for your OS/architecture. After extraction, run the single binary <code>resin</code>.
+前往项目的 <a href="https://github.com/Resinat/Resin/releases">Release</a> 页面，下载适合你操作系统架构的程序包。解压得到单个二进制文件 <code>resin</code>。
 
 ```bash
-RESIN_ADMIN_TOKEN=<admin-dashboard-password> \
-RESIN_PROXY_TOKEN=<proxy-password> \
+RESIN_ADMIN_TOKEN=【管理面板密码】 \
+RESIN_PROXY_TOKEN=【代理密码】 \
 RESIN_STATE_DIR=./data/state \
 RESIN_CACHE_DIR=./data/cache \
 RESIN_LOG_DIR=./data/log \
@@ -363,11 +356,11 @@ RESIN_PORT=2260 \
 ./resin
 ```
 
-Alternatively, create a `.env` file in the working directory and run `./resin`:
+也可以在工作目录创建 `.env` 文件，然后直接运行 `./resin`：
 
 ```dotenv
-RESIN_ADMIN_TOKEN=<admin-dashboard-password>
-RESIN_PROXY_TOKEN=<proxy-password>
+RESIN_ADMIN_TOKEN=【管理面板密码】
+RESIN_PROXY_TOKEN=【代理密码】
 RESIN_STATE_DIR=./data/state
 RESIN_CACHE_DIR=./data/cache
 RESIN_LOG_DIR=./data/log
@@ -377,25 +370,25 @@ RESIN_PORT=2260
 </details>
 
 <details>
-<summary><b>Option 2: Build from source</b></summary>
+<summary><b>方式二：通过源码编译</b></summary>
 <br>
-Prerequisites: Go 1.25+ and Node.js installed.
+前提条件：请确保环境中已安装 Go 1.25+ 和 Node.js。
 
 ```bash
-# 1. Clone Resin source
+# 1. 下载 Resin 源码
 git clone https://github.com/Resinat/Resin.git
 
-# 2. Build WebUI
+# 2. 编译 WebUI
 cd Resin/webui
 npm install && npm run build
 cd ..
 
-# 3. Build Resin core
+# 3. 编译 resin 核心
 go build -tags "with_quic with_wireguard with_grpc with_utls" -o resin ./cmd/resin
 
-# 4. Run
-RESIN_ADMIN_TOKEN=<admin-dashboard-password> \
-RESIN_PROXY_TOKEN=<proxy-password> \
+# 4. 运行程序
+RESIN_ADMIN_TOKEN=【管理面板密码】 \
+RESIN_PROXY_TOKEN=【代理密码】 \
 RESIN_STATE_DIR=./data/state \
 RESIN_CACHE_DIR=./data/cache \
 RESIN_LOG_DIR=./data/log \
@@ -407,26 +400,26 @@ RESIN_PORT=2260 \
 
 ---
 
-## 🛠️ FAQ
+## 🛠️ 常见错误 (FAQ)
 
-- **Q: How do I let LAN or localhost targets skip proxy nodes?**
-  - **A**: Set `RESIN_PROXY_BYPASS` to a semicolon/comma/newline-separated rule list. Matching requests are dialed directly by Resin instead of through a proxy node. Example: `RESIN_PROXY_BYPASS="localhost;127.*;10.*;172.16.0.0/12;192.168.*;<local>"`. Supported rules include exact hosts, `*`/`?` wildcards, CIDR ranges, and `<local>` for hostnames without dots.
-- **Q: Startup fails with `RESIN_PROXY_TOKEN` undefined?**
-  - **A**: Even if you do not want a proxy password, you must explicitly set it to empty: `RESIN_PROXY_TOKEN=""`. On shells that drop empty environment variables, create a `.env` file with `RESIN_PROXY_TOKEN=`.
-- **Q: Why does Resin reject `RESIN_AUTH_VERSION=LEGACY_V0`?**
-  - **A**: `LEGACY_V0` is no longer supported. Remove `RESIN_AUTH_VERSION` or set it to `V1`. If you are upgrading from a release that used legacy authentication, see the [v1.0.0 auth migration guide](doc/v1.0.0-migration-guide.md).
-- **Q: Why can't my SOCKS5 client connect?**
-  - **A**: If `RESIN_PROXY_TOKEN` is non-empty, the client must send SOCKS5 username/password authentication. If it is explicitly set to an empty string, `NO AUTH` is also allowed.
-- **Q: How to write reverse-proxy paths for WebSocket (ws/wss)?**
-  - **A**: In the URL path, the protocol field must still be `http` or `https` (not `ws`/`wss`). Resin auto-detects and handles WebSocket upgrade.
+- **Q: 如何让内网或本机目标不走代理节点？**
+  - **A**: 配置 `RESIN_PROXY_BYPASS`，用分号、逗号或换行分隔规则。命中的请求会由 Resin 本机直连目标，而不是通过代理节点。例如：`RESIN_PROXY_BYPASS="localhost;127.*;10.*;172.16.0.0/12;192.168.*;<local>"`。规则支持精确主机、`*`/`?` 通配符、CIDR 网段，以及表示无点号本地域名的 `<local>`。
+- **Q: 启动失败提示 `RESIN_PROXY_TOKEN` 未定义？**
+  - **A**: 就算你不打算启用代理密码，也必须显式配置它为空：`RESIN_PROXY_TOKEN=""`。如果你的 shell 会丢弃空环境变量，请创建 `.env` 文件并写入 `RESIN_PROXY_TOKEN=`。
+- **Q: 为什么配置 `RESIN_AUTH_VERSION=LEGACY_V0` 会启动失败？**
+  - **A**: 当前版本已不再支持 `LEGACY_V0`，请删除 `RESIN_AUTH_VERSION` 或将其设为 `V1`。如果你正从使用旧认证格式的版本升级，请参阅 [v1.0.0 认证迁移指南](doc/v1.0.0-migration-guide.md)。
+- **Q: 为什么 SOCKS5 客户端连不上？**
+  - **A**: 若 `RESIN_PROXY_TOKEN` 非空，客户端需要发送 SOCKS5 用户名密码认证；若它被显式设为空字符串，则也允许 `NO AUTH`。
+- **Q: 使用反向代理 WebSocket 协议（如 ws/wss）怎么写路径？**
+  - **A**: 目标无论是不是 ws/wss，URL 路径里的协议字段**依然只能写 `http` 或 `https`**（不能写 ws/wss）。Resin 会自动探测并完成 WebSocket 协议升级（Upgrade）。
 
 ---
 
-## ⚠️ License and Disclaimer
+## ⚠️ 免责声明与许可证
 
-- **License**: This project is licensed under the [MIT License](LICENSE).
-- **Use scope**: This project is provided for technical research and engineering practice in proxy scheduling and management. It does not constitute legal, compliance, audit, or security advice.
-- **Lawful use requirement**: You are responsible for ensuring your usage complies with applicable laws, regulations, target-service Terms of Service (ToS), and data-processing obligations, and for ensuring you have proper authorization for proxy nodes, target resources, and related data.
-- **Prohibited use**: You must not use this project for unauthorized access, control-evasion, fraud, attacks, abusive traffic generation, or other illegal or non-compliant activity.
-- **No warranty**: This project is provided on an "AS IS" basis, without express or implied warranties, including but not limited to merchantability, fitness for a particular purpose, and non-infringement.
-- **Limitation of liability**: To the maximum extent permitted by applicable law, authors and contributors are not liable for any direct, indirect, incidental, special, exemplary, or consequential damages arising from use of, or inability to use, this project.
+- **许可证**：本项目采用 [MIT License](LICENSE)。
+- **使用性质**：本项目用于网络代理调度与管理的技术研究及工程实践，不构成任何法律、合规、审计或安全建议。
+- **合法使用要求**：你必须自行确保使用行为符合所在地法律法规、目标服务条款（ToS）及数据处理要求，并确认你对代理节点、目标资源和相关数据具有合法授权。
+- **禁止用途**：不得将本项目用于未授权访问、规避控制措施、欺诈、攻击、滥发请求或其他违法违规活动。
+- **无担保条款**：本项目按“现状（AS IS）”提供，不附带任何明示或默示担保（包括但不限于适销性、特定用途适用性、非侵权）。
+- **责任限制**：在适用法律允许的最大范围内，作者与贡献者不对因使用或无法使用本项目导致的任何直接、间接、附带或衍生损失承担责任。
