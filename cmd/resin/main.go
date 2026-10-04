@@ -76,25 +76,6 @@ func supportsANSIColorOnStderr() bool {
 	return (stat.Mode() & os.ModeCharDevice) != 0
 }
 
-func startupWarnf(format string, args ...any) {
-	message := fmt.Sprintf(format, args...)
-	if supportsANSIColorOnStderr() {
-		fmt.Fprintf(os.Stderr, "\x1b[33mwarning:\x1b[0m %s\n", message)
-	} else {
-		fmt.Fprintf(os.Stderr, "warning: %s\n", message)
-	}
-}
-
-func authVersionStartupWarning(authVersion config.AuthVersion) string {
-	if authVersion != config.AuthVersionLegacyV0 {
-		return ""
-	}
-	return fmt.Sprintf(
-		"RESIN_AUTH_VERSION=LEGACY_V0 enables legacy auth compatibility and will be removed in a future release. Migrate to V1. Migration guide: %s",
-		config.AuthMigrationGuideURL,
-	)
-}
-
 func loadRuntimeConfig(engine *state.StateEngine) *config.RuntimeConfig {
 	runtimeCfg, ver, err := engine.GetSystemConfig()
 	if err != nil {
@@ -258,7 +239,9 @@ func newTopologyRuntime(
 	})
 	log.Println("Topology: GlobalNodePool initialized")
 
-	singboxBuilder, err := outbound.NewSingboxBuilder()
+	singboxBuilder, err := outbound.NewSingboxBuilderWithConfig(outbound.SingboxBuilderConfig{
+		DNSUpstreams: envCfg.NodeDNSUpstreams,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("singbox builder: %w", err)
 	}
@@ -400,6 +383,7 @@ func bootstrapTopology(
 		sub.SetFetchConfig(ms.URL, ms.UpdateIntervalNs)
 		sub.SetSourceType(ms.SourceType)
 		sub.SetContent(ms.Content)
+		sub.SetIncrementalAliveNodes(ms.IncrementalAliveNodes)
 		sub.SetEphemeralNodeEvictDelayNs(ms.EphemeralNodeEvictDelayNs)
 		sub.CreatedAtNs = ms.CreatedAtNs
 		sub.UpdatedAtNs = ms.UpdatedAtNs
@@ -411,10 +395,8 @@ func bootstrapTopology(
 	if err != nil {
 		return fmt.Errorf("load platforms: %w", err)
 	}
-	if envCfg != nil && envCfg.AuthVersion == config.AuthVersionV1 {
-		if err := validatePersistedPlatformNamesForV1(dbPlats); err != nil {
-			return fmt.Errorf("validate platform names for V1: %w", err)
-		}
+	if err := validatePersistedPlatformNamesForV1(dbPlats); err != nil {
+		return fmt.Errorf("validate platform names for V1: %w", err)
 	}
 	if err := ensureDefaultPlatform(engine, envCfg, dbPlats); err != nil {
 		return fmt.Errorf("ensure default platform: %w", err)
@@ -444,10 +426,9 @@ func validatePersistedPlatformNamesForV1(platformsInDB []model.Platform) error {
 
 	if len(invalidPlatformNames) > 0 {
 		return fmt.Errorf(
-			"%d platform(s) are incompatible with RESIN_AUTH_VERSION=V1: %s. Platform name rules: must be non-empty; must not be reserved name; must not contain any of \".:|/\\\\@?#%%~\"; must not contain spaces, tabs, newlines, or carriage returns. Please rename these platforms; you can temporarily start with RESIN_AUTH_VERSION=LEGACY_V0, rename them, then switch back to V1. Migration guide: %s",
+			"%d platform(s) are incompatible with V1: %s. Platform name rules: must be non-empty; must not be reserved name; must not contain any of \".:|/\\\\@?#%%~\"; must not contain spaces, tabs, newlines, or carriage returns. Use a Resin release that supports LEGACY_V0 to rename these platforms before upgrading. Migration guide: https://github.com/Resinat/Resin/blob/master/doc/v1.0.0-migration-guide.md",
 			len(invalidPlatformNames),
 			strings.Join(invalidPlatformNames, ", "),
-			config.AuthMigrationGuideURL,
 		)
 	}
 	return nil

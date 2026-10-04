@@ -2,9 +2,9 @@
 
 ## 项目概述
 
-本项目旨在构建一个高性能、智能化的 100k 规模节点代理池管理系统。与传统的 IP 轮询池不同，本项目引入了 **“平台(Platform)”** 与 **“账号(Account)”** 的业务概念，将底层的代理订阅、零散节点聚合成一个支持**会话保持（粘性路由）** 的 http 流量网关。
+本项目旨在构建一个高性能、智能化的 100k 规模节点代理池管理系统。与传统的 IP 轮询池不同，本项目引入了 **“平台(Platform)”** 与 **“账号(Account)”** 的业务概念，将底层的代理订阅、零散节点聚合成一个支持**会话保持（粘性路由）** 的多协议代理网关。
 
-系统支持正向代理与反向代理两种接入模式，能够根据业务需求自动维护 IP 租约，屏蔽底层节点的复杂性，为上层多账号运营业务提供稳定、可控的网络环境。
+系统支持 HTTP 正向代理、SOCKS5 正向代理与反向代理三种接入模式，能够根据业务需求自动维护 IP 租约，屏蔽底层节点的复杂性，为上层多账号运营业务提供稳定、可控的网络环境。
 
 ## 设计理念与原则
 
@@ -28,8 +28,8 @@
 * ID：全不可变 UUID，作为主键。
 * Name：平台名，全局唯一。
 * StickyTTL: time.Duration，该平台的粘性租约寿命。
-* RegexFilters：一个正则表达式列表。按照节点的 Tag 的正则表达式过滤器。同时满足所有过滤器才符合条件。
-* RegexFiltersCompiled：编译后的正则表达式列表。用于运行时匹配。随着 RegexFilters 更新。
+* RegexFilters：节点标签过滤规则列表，语法见“节点标签过滤规则”。
+* RegexFiltersCompiled：按规则类型分组的编译结果。随着 RegexFilters 更新。
 * RegionFilters：一个地区列表。小写 ISO codes (e.g., "hk", "us")。节点的出口 IP 地区属于该列表才符合条件。空表示不做地区筛选。
 * 反向代理 Account 为空时的行为：随机路由 / 固定 Header 提取 / 按 Account Header Rule 提取。
 * 反向代理匹配 Account 失败后的行为：随机路由 或 拒绝请求。默认是随机路由。
@@ -41,7 +41,7 @@
 
 ## 业务身份如何稳定映射到网络身份
 ### 需求
-同一业务账号要在一段时间内保持出口 IP 一致，不同账号要尽量隔离；同时客户端接入形式不统一（正向代理与反向代理并存）。
+同一业务账号要在一段时间内保持出口 IP 一致，不同账号要尽量隔离；同时客户端接入形式不统一（HTTP 正向代理、SOCKS5 正向代理与反向代理并存）。
 
 ### 设计目标
 把所有请求统一归一为 `Platform + Account` 上下文，在不暴露节点细节的前提下实现粘性路由。
@@ -49,24 +49,29 @@
 ### 设计决策
 系统把路由输入统一为 `(platformID, account, targetDomain)`：  
 注意：外部接口（HTTP 头、反向代理路径）通常使用 Platform Name 作为输入，但在入口处应立即通过 Name -> ID 映射转换为 ID。后续逻辑只认 ID，不认 Name。
-1. 认证解析由 `RESIN_AUTH_VERSION` 强制控制（迁移期双栈，环境变量必填）。
-   * 仅允许 `LEGACY_V0|V1`；缺失或非法值时进程拒绝启动并提示迁移文档。
-   * `LEGACY_V0` 启动时打印兼容模式告警（未来版本会移除）。
+1. 认证解析固定使用 V1。`RESIN_AUTH_VERSION` 可选；未设置或为空时默认使用 V1，非空时仅允许 `V1`。
    * 启动期 fatal/warning 提示需保持清晰可读；在终端支持 ANSI 且未设置 `NO_COLOR` 时，fatal 与 warning 可使用颜色高亮。
-2. `V1` 启动前置校验：
+2. 启动前置校验：
    * `RESIN_PROXY_TOKEN` 非空时不能包含 `.:|/\@?#%~`，且不能包含空格、tab、换行、回车。
-   * 读取数据库中全部 Platform 名称并按 V1 规则校验；若存在历史不合规名称，拒绝启动并提示先以 `LEGACY_V0` 启动后重命名再切回 `V1`。
-3. 正向代理：
-   * `V1` 格式：`Proxy-Authorization: Basic Platform.Account:PROXY_TOKEN`（user=Platform.Account，pass=PROXY_TOKEN）；解析时先按最右侧 `:` 切 Token，再对左侧身份串按第一个出现的 `.` 或 `:` 切 `Platform` 与 `Account`。
-   * `LEGACY_V0` 格式：`Proxy-Authorization: Basic PROXY_TOKEN:Platform:Account`（user=PROXY_TOKEN，pass=Platform:Account）；`pass` 按第一个 `:` 切 `Platform` 与 `Account`。
-   * `LEGACY_V0` 模式下禁用 V1 新格式；`V1` 模式下禁用 `PROXY_TOKEN:Platform:Account` 旧格式（`RESIN_PROXY_TOKEN` 为空时仅保留有限兼容解析用于迁移）。
-4. 反向代理：
-   * `V1` 路径：`/PROXY_TOKEN/Platform.Account/protocol/host/path?query`；身份段按第一个出现的 `.` 或 `:` 切分。
-   * `LEGACY_V0` 路径：`/PROXY_TOKEN/Platform:Account/protocol/host/path?query`；身份段按第一个 `:` 切分。
-   * `LEGACY_V0` 模式下禁用 V1 身份段解析策略（例如纯 `Platform` 身份段在 `LEGACY_V0` 直接视为路径解析错误）。
+   * 读取数据库中全部 Platform 名称并按 V1 规则校验；若存在不合规名称则拒绝启动。
+3. 入站接入点：
+   * `RESIN_PORT` 定义默认接入点。默认接入点同时承载控制面 API、WebUI、HTTP 正向代理、SOCKS5 正向代理与反向代理；它由环境变量生成，只读且不可删除。
+   * 用户可通过控制面增加持久化的自定义接入点。每个接入点定义唯一端口，并分别控制管理页面、代理总开关、HTTP 正向代理、HTTP 反向代理和 SOCKS5；配置增删改即时更新 listener，无需重启。
+   * 所有接入点共享控制面、路由池、节点池、出站 transport pool、日志与指标组件，仅 listener 和入站能力策略彼此独立。
+   * 每个接入点在 TCP 层按首字节分流：首字节为 `0x05` 时进入 SOCKS5；其余流量进入 HTTP 入口，再区分控制面 API、WebUI、HTTP 正向代理与反向代理。
+   * `/healthz` 在所有接入点始终可用；关闭管理页面时，其他控制面 API 与 WebUI 路径返回 404。
+   * 接入点可随时配置“当系统未设定代理令牌时，也强制客户端发送代理认证信息”（默认关闭）。`RESIN_PROXY_TOKEN` 非空时始终执行令牌认证；为空且此选项启用时，HTTP 正向代理缺少可解析且非空的 Basic 用户名会返回 407，SOCKS5 仅接受 `0x02` 并要求用户名和密码均非空，但不校验密码内容。空令牌下，此选项只用于强制携带身份，不构成安全认证。当启用此选项，客户端发来空认证不再视为 Default 平台请求。
+4. HTTP 正向代理：
+   * 格式：`Proxy-Authorization: Basic Platform.Account:PROXY_TOKEN`（user=Platform.Account，pass=PROXY_TOKEN）；解析时先按最右侧 `:` 切 Token，再对左侧身份串按第一个出现的 `.` 或 `:` 切 `Platform` 与 `Account`。
+5. SOCKS5 正向代理：
+   * 仅支持 SOCKS5 `CONNECT`；成功后进入原始双向 TCP 隧道。
+   * `RESIN_PROXY_TOKEN` 非空时，仅接受 RFC1929 用户名密码认证（method `0x02`）：`username=<Platform.Account|Platform:Account>`，`password=<PROXY_TOKEN>`。
+   * `RESIN_PROXY_TOKEN` 为空时，允许 `NO AUTH (0x00)`；若客户端同时提供 RFC1929 用户名密码认证，服务端优先选择该方法以提取 `Platform/Account` 身份，此时密码不做校验。
+6. 反向代理：
+   * 路径：`/PROXY_TOKEN/Platform.Account/protocol/host/path?query`；身份段按第一个出现的 `.` 或 `:` 切分。
    * URL 身份段（`Platform.Account` / `Platform:Account`）接口定位为“简单使用 / 手动调试”；正式集成推荐通过请求头 `X-Resin-Account` 提供 Account。`X-Resin-Account` 的优先级高于 URL 身份段的 Account。
-5. Platform 名称在创建/更新时先 trim，再校验：非空、全局唯一、不可命中保留字（`Default`/`api`），且不得包含 `.:|/\@?#%~` 与空格、tab、换行、回车。
-6. 当 Platform 未提供，默认使用 Default 平台。当代理的 Account 未提供，默认使用平台内的随机路由。
+7. Platform 名称在创建/更新时先 trim，再校验：非空、全局唯一、不可命中保留字（`Default`/`api`），且不得包含 `.:|/\@?#%~` 与空格、tab、换行、回车。
+8. 当 Platform 未提供，默认使用 Default 平台。当代理的 Account 未提供，默认使用平台内的随机路由。
 
 正向代理例子（V1）：
 | 正向代理认证（`user:pass`） | ProxyToken | Platform | Account |
@@ -76,6 +81,15 @@
 | `Nimbus:resin-123456` | `resin-123456` | `Nimbus` | 空 |
 | `Nimbus.:resin-123456` | `resin-123456` | `Nimbus` | 空 |
 | `MyHub.bEA:234:resin-123456` | `resin-123456` | `MyHub` | `bEA:234` |
+
+SOCKS5 用户名密码认证例子（V1）：
+| method | username | password | ProxyToken | Platform | Account |
+| --- | --- | --- | --- | --- | --- |
+| `0x02` | `Nimbus.Tom` | `resin-123456` | `resin-123456` | `Nimbus` | `Tom` |
+| `0x02` | `Nimbus` | `resin-123456` | `resin-123456` | `Nimbus` | 空 |
+| `0x02` | `MyHub.bEA:234` | `resin-123456` | `resin-123456` | `MyHub` | `bEA:234` |
+
+当 `RESIN_PROXY_TOKEN=""` 时，SOCKS5 还允许 `NO AUTH (0x00)`。此时若客户端不发送用户名密码，则 `Platform/Account` 均为空，按 Default 平台 + 平台内随机路由处理。
 
 反向代理 URL 身份段例子（V1）：
 | 反向代理 URL | ProxyToken | Platform | Account |
@@ -129,17 +143,19 @@ URL 不允许包含查询部分与 ? 字符。
 * **X-Resin-Error**：自定义响应头，值为错误类型的标识字符串（如 `AUTH_FAILED`、`URL_PARSE_ERROR`）。
 * **Body**：纯文本 (text/plain)，简短的人类可读错误描述。
 
+说明：本节默认描述 HTTP 入口（控制面 API、HTTP 正向代理、反向代理）的错误响应。SOCKS5 正向代理不返回 HTTP 状态码或 `X-Resin-Error` 头，而是使用 RFC1928/RFC1929 协议回复，见后文“SOCKS5 协议返回”。
+
 ### 认证阶段错误
 
 | 场景 | HTTP Code | X-Resin-Error | 说明 |
 |------|-----------|---------------|------|
-| PROXY_TOKEN 缺失或格式错误 (正向代理) | 407 Proxy Authentication Required | `AUTH_REQUIRED` | 正向代理未提供 `Proxy-Authorization` 头或格式不正确。响应附加 `Proxy-Authenticate: Basic realm="Resin"` 头。 |
-| PROXY_TOKEN 校验失败 (正向代理) | 403 Forbidden | `AUTH_FAILED` | 提供的 Token 格式正确但校验不通过（如未知 Token）。 |
+| PROXY_TOKEN 缺失或格式错误 (HTTP 正向代理) | 407 Proxy Authentication Required | `AUTH_REQUIRED` | HTTP 正向代理未提供 `Proxy-Authorization` 头或格式不正确。响应附加 `Proxy-Authenticate: Basic realm="Resin"` 头。 |
+| PROXY_TOKEN 校验失败 (HTTP 正向代理) | 403 Forbidden | `AUTH_FAILED` | 提供的 Token 格式正确但校验不通过（如未知 Token）。 |
 | PROXY_TOKEN 校验失败 (反向代理) | 403 Forbidden | `AUTH_FAILED` | 反向代理路径中缺少 Token 或 Token 不匹配。 |
 
 ### 反向代理 URL 解析错误
 
-反向代理路径格式为 `/PROXY_TOKEN/<identity>/protocol/host/path?query`（`V1` 使用 `Platform.Account` 或 `Platform:Account`；`LEGACY_V0` 使用 `Platform:Account`）。如果路径解析失败，在认证通过后返回以下错误：
+反向代理路径格式为 `/PROXY_TOKEN/<identity>/protocol/host/path?query`，identity 使用 `Platform.Account` 或 `Platform:Account`。如果路径解析失败，在认证通过后返回以下错误：
 
 | 场景 | HTTP Code | X-Resin-Error | 说明 |
 |------|-----------|---------------|------|
@@ -162,13 +178,28 @@ URL 不允许包含查询部分与 ? 字符。
 
 | 场景 | HTTP Code | X-Resin-Error | 说明 |
 |------|-----------|---------------|------|
-| Dial 上游失败（正向代理 CONNECT） | 502 Bad Gateway | `UPSTREAM_CONNECT_FAILED` | 通过节点拨号连接目标失败（连接被拒、网络不可达等）。同时触发 `RecordResult(false)`。 |
+| Dial 上游失败（HTTP 正向代理 CONNECT） | 502 Bad Gateway | `UPSTREAM_CONNECT_FAILED` | 通过节点拨号连接目标失败（连接被拒、网络不可达等）。同时触发 `RecordResult(false)`。 |
 | 上游连接超时 | 504 Gateway Timeout | `UPSTREAM_TIMEOUT` | 连接上游或等待上游响应超时。同时触发 `RecordResult(false)`。 |
-| 上游请求失败（正向代理 HTTP） | 502 Bad Gateway | `UPSTREAM_REQUEST_FAILED` | 通过节点转发 HTTP 请求失败（如读写错误）。同时触发 `RecordResult(false)`。 |
+| 上游请求失败（HTTP 正向代理 HTTP） | 502 Bad Gateway | `UPSTREAM_REQUEST_FAILED` | 通过节点转发 HTTP 请求失败（如读写错误）。同时触发 `RecordResult(false)`。 |
 | 上游请求失败（反向代理） | 502 Bad Gateway | `UPSTREAM_REQUEST_FAILED` | 反向代理通过 `httputil.ReverseProxy` 的 `ErrorHandler` 回调捕获的上游错误。同时触发 `RecordResult(false)`。 |
 
-### 正向代理 CONNECT 特殊行为
-正向代理的 CONNECT 请求在成功建立隧道后，返回 `HTTP/1.1 200 Connection Established`。此后 Resin 不再介入 HTTP 语义——连接变为双向 TCP 隧道。隧道建立后的网络错误不会产生 HTTP 错误响应；连接将直接中断。
+### SOCKS5 协议返回
+
+SOCKS5 正向代理只支持 SOCKS5 `CONNECT`。它使用标准 SOCKS5 / RFC1929 协议回复，不返回 HTTP 状态码或 `X-Resin-Error`。
+
+| 场景 | 协议回复 | 说明 |
+|------|----------|------|
+| 客户端未提供可接受的认证方法 | 方法协商回复 `0x05 0xFF` | 服务端拒绝继续会话。 |
+| RFC1929 用户名密码认证失败 | 用户名密码子协商回复 `0x01 0x01` | `RESIN_PROXY_TOKEN` 非空时密码必须等于 `PROXY_TOKEN`。 |
+| 命令不是 `CONNECT` | SOCKS5 reply `REP=0x07` | 当前实现不支持 `BIND` / `UDP ASSOCIATE`。 |
+| 地址类型不支持 | SOCKS5 reply `REP=0x08` | 当前仅支持 IPv4 / IPv6 / 域名三类标准地址。 |
+| 路由失败、无可用节点、拨号失败、超时、向客户端写入成功回复失败 | SOCKS5 reply `REP=0x01` | 协议面统一暴露为 `GENERAL FAILURE`；更细粒度的 `resin_error` / `upstream_stage` 仅记录在请求日志中。 |
+| 成功建立隧道 | SOCKS5 reply `REP=0x00` | 回复成功后进入原始双向 TCP 隧道。 |
+
+### 隧道型正向代理特殊行为
+* HTTP 正向代理的 `CONNECT` 请求在成功建立隧道后，返回 `HTTP/1.1 200 Connection Established`。
+* SOCKS5 正向代理在成功建立隧道后，返回标准 SOCKS5 success reply（`REP=0x00`）。
+* 两种隧道在成功建立后，Resin 都不再介入更高层协议语义，连接进入双向 TCP 转发。隧道建立后的网络错误不会再生成 HTTP 响应或新的 SOCKS5 reply；连接将直接中断。
 
 ### 错误响应示例
 正向代理认证失败：
@@ -236,9 +267,7 @@ No available proxy nodes
 	* CreatedAt：节点的创建时间。指的是节点首次被添加到全局池的时间。程序重启不变。
 	* SubscriptionIDs：一个 slice。表示持有该节点的订阅 ID 集合。
   * --- 方法 ---
-	* MatchRegexs(regexes []*regexp.Regexp) bool：用于判断该节点是否符合给定的正则表达式列表。
-        * 逻辑：遍历 `SubscriptionIDs`，找到这些订阅及其 View 中的 Tags。遍历的时候加读锁。
-        * 只有当节点在**任意一个** Enabled 订阅下的**任意一个** Tag 满足**所有**正则表达式时，返回 true。Tag 匹配时使用 `<订阅名>/<Tag>` 的格式。
+	* MatchTagFilter(filter TagFilter, subLookup SubLookupFunc) bool：按“节点标签过滤规则”判断节点是否匹配。
 
 本项目不使用原生的 sing-box OutboundManager，而是实现上述高性能 Outbound Manager。
 
@@ -248,7 +277,7 @@ No available proxy nodes
 * 特质：支持 O(1) 的随机选取与 O(1) 的增删查。
 * 过滤条件：
     1. 节点状态正常（非 Circuit Break）。
-    2. 调用 `NodeEntry.MatchRegexs(Platform.RegexFilters)` 判断 Tag 是否匹配。
+    2. 调用 `NodeEntry.MatchTagFilter(Platform.RegexFilters, subLookup)` 判断 Tag 是否匹配。
     3. 节点必须有出口 IP（无论 Platform 是否配置 `RegionFilters`）。
     4. 若 `RegionFilters` 非空，则节点出口 IP 地区必须符合 `RegionFilters`。
     5. 有至少一条延迟信息。
@@ -264,7 +293,7 @@ Platform 应该向外提供一个脏更新的接口，用来通知脏节点。�
 
 动态更新的时机：
 	* 出口 IP 变更：当 `ProbeManager` 探测到节点出口 IP 发生变化（或从无到有）。属于脏更新。
-	* 节点引用变更：当节点的 SubscriptionIDs 发生变化，可能会影响 MatchRegexs 的结果（因为 Tag 集合变了）。属于脏更新。
+	* 节点引用变更：当节点的 SubscriptionIDs 发生变化，可能会影响 MatchTagFilter 的结果（因为 Tag 集合变了）。属于脏更新。
 	* 熔断触发 / 恢复：属于脏更新。	
 	* Platform 过滤器配置变更：全量重建。
 
@@ -328,7 +357,17 @@ sing-box 原版使用节点的名字 Tag 作为节点的 ID。但 Resin 使用 N
 ### 节点的 Tag
 全局池中的节点没有 Tag 的概念。Tag 是订阅视图下的概念。
 Tag 的统一格式是 `<订阅名>/<原始 Tag>`。
-Platform 过滤时，通过 `NodeEntry.MatchRegexs` 方法，反向查询 Referencing Subscriptions 的视图来获取 Tag。
+Platform 过滤时，通过 `NodeEntry.MatchTagFilter` 方法，反向查询 Referencing Subscriptions 的视图来获取 Tag。
+
+#### 节点标签过滤规则
+
+每项规则匹配 `<订阅名>/<Tag>`，仅首字符作为规则前缀，剩余内容按 Go 正则解析：
+
+* 普通规则为 ANY，普通规则之间为 OR。
+* `*` 前缀为 MUST，所有 MUST 都必须命中。
+* `!` 前缀为 MUST_NOT，任意 MUST_NOT 命中即排除整个节点。
+
+正向条件必须由同一个 Enabled Tag 满足：所有 MUST 均命中，且 ANY 为空或至少一个 ANY 命中。MUST_NOT 检查节点的所有 Enabled Tag。没有正向规则时，任何拥有 Enabled Subscription 且未被排除的节点都满足标签过滤。
 
 
 ### 由热路径 / 冷路径决定的设计决策
@@ -344,6 +383,7 @@ Platform 过滤时，通过 `NodeEntry.MatchRegexs` 方法，反向查询 Refere
 * `RecordResult(id NodeHash, success bool)`：提交节点的一次网络请求结果。
 	* `success=true`：重置连续失败计数 (`FailureCount = 0`)。若节点当前处于熔断状态，立即恢复（`清空 CircuitOpenSince`）。
 	* `success=false`：原子递增连续失败计数。若计数达到配置的阈值 (`MaxConsecutiveFailures`)，触发熔断（`CircuitOpenSince = 当前时间`）。
+* `RecordPassiveResult(platformID string, id NodeHash, success bool)`：提交来自用户代理流量的被动网络结果。若对应 Platform 开启 `passive_circuit_breaker_disabled`，则忽略失败结果，不增加连续失败计数；成功结果仍作为正向健康反馈处理。
 * `RecordLatency(id NodeHash, domain string, latency *Duration)`：提交节点对特定域名的延迟探测尝试。`latency=nil` 表示“仅记录本次探测尝试，不写延迟样本”；`latency!=nil` 时按 TD-EWMA 更新延迟统计。无论 `latency` 是否为空，都会更新 `LastLatencyProbeAttempt`，若域名属于 `LatencyAuthorities` 还会更新 `LastAuthorityLatencyProbeAttempt`。如果调用本次 `RecordLatency` 之前，节点的 `LatencyTable` 为空，需要通知各 Platform 重新过滤这个节点。
 * `UpdateNodeEgressIP(id NodeHash, ip *netip.Addr)`：记录一次出口 IP 探测尝试并可选更新出口 IP。`ip=nil` 表示“仅记录尝试”；`ip!=nil` 时更新出口 IP（若变更则触发 Platform 脏更新）。无论 `ip` 是否为空，都会更新 `LastEgressUpdateAttempt`。
 
@@ -351,6 +391,8 @@ Platform 过滤时，通过 `NodeEntry.MatchRegexs` 方法，反向查询 Refere
 Resin 使用计数器熔断机制保护系统稳定性。
 * 默认状态：新节点加入系统时默认是熔断状态。包括订阅同步创建的新节点，以及启动恢复时从 `nodes_static` 注入但尚未被 `nodes_dynamic` 覆盖的节点。（节点默认不熔断其实也能工作，因为进入平台路由池的条件还有“有出口”与“有延迟”，已经有这层兜底在了。把默认状态改成熔断其实是为了逻辑上更清晰。另外，把没准备好的节点与熔断分为一类。前端进行过滤的时候，不会在健康过滤器下看到“待测”状态）
 * 熔断触发：仅由 `RecordResult(id, false)` 触发。当连续失败次数 >= 阈值时，节点进入熔断状态。熔断的节点会立即从所有 Platform 的可路由视图中移除，不再承载用户流量。
+	* 用户代理流量通过 `RecordPassiveResult(platformID, id, false)` 上报失败；当对应 Platform 开启 `passive_circuit_breaker_disabled` 时，这类失败不会触发熔断。
+	* 主动探测仍直接使用 `RecordResult(id, false)`，不受 Platform 的 `passive_circuit_breaker_disabled` 影响。
 * 熔断恢复：熔断后的节点依然保留在全局池中，接受 ProbeManager 的主动探测。一旦 `RecordResult(id, true)` 被调用（通常由主动探测触发），节点立即恢复，重新加入可路由视图。
 * 熔断逻辑由全局代理池管理。禁止其他模块直接修改节点的熔断状态。
 
@@ -397,14 +439,15 @@ ProbeManager 采用 **双优先级队列 + 固定 worker 池** 的调度模型�
 
 #### 信号源
 * **连通性信号**：
-    * **正向代理**：`http.Client.Do` 或 `TcpDial` 的返回结果。
+    * **HTTP 正向代理**：普通请求使用 `http.Client.Do`；`CONNECT` 隧道使用 `TcpDial` 与后续 tunnel copy 的结果。
+    * **SOCKS5 正向代理**：使用 `TcpDial` 与后续 tunnel copy 的结果。
     * **反向代理**：`httputil.ReverseProxy` 的 `ErrorHandler` 回调。
     * 只要网络层建立连接成功（即便 HTTP 返回 500），通常视为节点健康（`RecordResult(true)`）；仅当网络握手失败、超时或连接被重置时，视为失败（`RecordResult(false)`）。
 * **延迟信号 (TLS Handshake)**：
-    * 绝大多数业务流量为 HTTPS。Resin 正向与反向代理均通过测量 **TLS Handshake RTT** 来评估节点延迟。
-    * **正向代理 (CONNECT)**：劫持 `net.Conn`，记录从写入 Client Hello (首字节) 到收到 Server Hello (由于 TCP 流式特性，通常是首个读操作) 的时间差。参考附录中的 `tlsLatencyConn` 实现。
+    * 绝大多数业务流量为 HTTPS。Resin 的 HTTP 正向代理、SOCKS5 正向代理与反向代理均通过测量 **TLS Handshake RTT** 来评估节点延迟。
+    * **隧道型正向代理（HTTP CONNECT / SOCKS5 CONNECT）**：包装目标连接，记录从写入 Client Hello (首字节) 到收到 Server Hello (由于 TCP 流式特性，通常是首个读操作) 的时间差。参考附录中的 `tlsLatencyConn` 实现。
     * **反向代理**：使用 `httptrace` 钩子监听 `TLSHandshakeStart` 与 `TLSHandshakeDone`。
-	* 对于非 HTTPS 协议，不进行延迟统计。
+		* 对于非 HTTPS 协议，不进行延迟统计。
 
 #### 采样与反馈
 为避免阻塞数据链路，所有被动探测数据的记录均为**异步**执行。
@@ -545,12 +588,12 @@ BootstrapLoader
 
 Resin 项目中所有的数据库都设计为单写，不会有多进程写入。
 
-数据库 schema 使用 golang-migrate 做版本化 migration。
+数据库 schema 使用 golang-migrate 做版本化 migration。无法无损映射到旧数据模型的 migration 不提供 down 文件；降级时必须恢复升级前的数据库备份。
 
 ### SQLite 数据模型
 #### state.db
 * system_config(config_json, version, updated_at_ns)
-* platforms(id PK, name UNIQUE, sticky_ttl_ns, regex_filters_json, region_filters_json, reverse_proxy_miss_action, reverse_proxy_empty_account_behavior, reverse_proxy_fixed_account_header, allocation_policy, updated_at_ns)
+* platforms(id PK, name UNIQUE, sticky_ttl_ns, regex_filters_json, region_filters_json, reverse_proxy_miss_action, reverse_proxy_empty_account_behavior, reverse_proxy_fixed_account_header, allocation_policy, passive_circuit_breaker_disabled, updated_at_ns)
 * subscriptions(id PK, name, url, update_interval_ns, enabled, ephemeral, created_at_ns, updated_at_ns)
 * account_header_rules(url_prefix PK, headers_json, updated_at_ns)
 
@@ -628,20 +671,18 @@ Resin 项目中所有的数据库都设计为单写，不会有多进程写入�
     * 租约信息加入租约表 与 IPLoadStats。
 
 8. 启动后台服务
-	* 第一批启动
-		* CacheFlushWorker。需要首先启动，因为后面的服务很多都需要写持久化
-		* GeoIP Updater（启动时检查 geoip 的 mtime 确认是否需要更新）
-	* 第二批启动
-		* ProbeManager（启动后正常进行周期性检查，不用像 订阅更新服务 强制全部重新检查一遍）
-		* 结构化请求日志相关服务
-		* 租约清理服务
-    * EphemeralNode 后台清理服务
-	* 第三批启动
-		* 订阅更新服务（启动强制触发一轮全部订阅更新，不管是否过期。这是为了避免弱持久化丢节点。之后周期性检查）
-	* 第四批启动
-		* API Server
-		* Forward Proxy Server
-		* Reverse Proxy Server
+    * 第一批启动
+        * CacheFlushWorker。需要首先启动，因为后面的服务很多都需要写持久化
+        * GeoIP Updater（启动时检查 geoip 的 mtime 确认是否需要更新）
+    * 第二批启动
+        * ProbeManager（启动后正常进行周期性检查，不用像 订阅更新服务 强制全部重新检查一遍）
+        * 结构化请求日志相关服务
+        * 租约清理服务
+        * EphemeralNode 后台清理服务
+    * 第三批启动
+        * 订阅更新服务（启动强制触发一轮全部订阅更新，不管是否过期。这是为了避免弱持久化丢节点。之后周期性检查）
+    * 第四批启动
+        * 统一入站服务（同一 `RESIN_PORT` 上承载控制面 API、WebUI、HTTP 正向代理、SOCKS5 正向代理与反向代理）
 
 ## 结构化请求日志
 结构化请求日志记录每次代理请求的详细信息。日志记录动作由 `requestlog` 模块异步执行，确保不阻塞代理主流程。这些日志主要用于运维监控、审计与故障排查，不参与路由决策。
@@ -669,20 +710,21 @@ Resin 项目中所有的数据库都设计为单写，不会有多进程写入�
 #### request_logs 表
 * `id`：UUID 主键
 * `ts_ns`：请求开始时间戳（Unix Nano）。
-* `proxy_type`：代理类型。1=正向代理，2=反向代理。
+* `proxy_type`：代理类型。1=HTTP 正向代理，2=反向代理，3=SOCKS5 正向代理。
 * `client_ip`：客户端 IP 地址。
 * `platform_id`：所属平台 ID。
 * `platform_name`：所属平台名称（快照）。
 * `account`：所属账号。
 * `target_host`：目标完整 Host (e.g., `www.alpha.example:443`)。
-* `target_url`：目标完整 URL (e.g., `https://www.alpha.example/search?q=hello`)。正向代理的 CONNECT 请求为空。
+* `target_url`：目标完整 URL (e.g., `https://www.alpha.example/search?q=hello`)。HTTP 正向代理的 `CONNECT` 与 SOCKS5 正向代理请求为空。
 * `node_hash`：出口节点的 Hash。
 * `node_tag`：出口节点展示 Tag (`<Subscription>/<Tag>`)。如果有多个订阅持有节点，选所属 subscription 创建最早的那个，同 subscription 选字典序最小的。
 * `egress_ip`：实际出口 IP 地址。
-* `duration_ns`：请求耗时。CONNECT 模式记录隧道保留时长。
+* `duration_ns`：请求耗时。隧道型请求（HTTP `CONNECT` / SOCKS5 `CONNECT`）记录隧道保留时长。
+* `first_byte_duration_ns`：从请求开始到观测到上游首批响应字节的耗时；未观测到时为 `0`。
 * `net_ok`：网络层是否成功 (0/1)。
-* `http_method`：HTTP 方法。CONNECT 模式记录为 CONNECT。
-* `http_status`：HTTP 状态码。
+* `http_method`：HTTP 方法。HTTP `CONNECT` 记录为 `CONNECT`；SOCKS5 正向代理无 HTTP 语义，记录为空字符串。
+* `http_status`：HTTP 状态码。SOCKS5 正向代理无 HTTP 语义，记录为 `0`。
 * `resin_error`：Resin 的逻辑错误码快照（如 `UPSTREAM_TIMEOUT`、`UPSTREAM_REQUEST_FAILED`）。
 * `upstream_stage`：失败阶段（例如 `forward_roundtrip`、`connect_dial`、`connect_upstream_to_client_copy`）。
 * `upstream_err_kind`：上游错误归类（例如 `dns_error`、`timeout`、`connection_refused`）。
@@ -743,8 +785,8 @@ Resin 需要做实事与历史的统计数据，用于 Dashboard 展示。
 
 #### 连接数
 * 统计实时的连接数。这里的连接指的是TCP 连接（一个打开的 socket / 一个 4 元组会话）。分为入站连接与出站连接。
-  * 入站是客户端到 Resin 的连接数。从 accept 成功开始计数，直到该 socket 被关闭。包括：Reverse Proxy / Forward Proxy 的所有客户端 TCP 连接、keep-alive 的空闲连接（idle）、CONNECT 被 hijack 后仍在传输的那条客户端 socket。
-  * 出站是 Resin 发起到目标站点/上游的 TCP socket 数，从 Dial 成功开始计数，直到该 socket 关闭。包括：正向代理 CONNECT 产生的到 target 的 TCP 连接、正向代理普通 HTTP 代理到上游的 TCP 连接、反向代理到上游 origin 的 TCP 连接（包括连接池里 idle 的连接）、ProbeManager 的探测连接。
+  * 入站是客户端到 Resin 的连接数。从 accept 成功开始计数，直到该 socket 被关闭。包括：控制面 API / WebUI / HTTP 正向代理 / SOCKS5 正向代理 / 反向代理的所有客户端 TCP 连接、keep-alive 的空闲连接（idle）、HTTP `CONNECT` 与 SOCKS5 隧道仍在传输的客户端 socket。
+  * 出站是 Resin 发起到目标站点/上游的 TCP socket 数，从 Dial 成功开始计数，直到该 socket 关闭。包括：HTTP `CONNECT` 与 SOCKS5 `CONNECT` 产生的到 target 的 TCP 连接、HTTP 正向代理普通请求到上游的 TCP 连接、反向代理到上游 origin 的 TCP 连接（包括连接池里 idle 的连接）、ProbeManager 的探测连接。
 * 每 `RESIN_METRIC_CONNECTIONS_INTERVAL_SECONDS` 统计一次。
 * 保留最近 `RESIN_METRIC_CONNECTIONS_RETENTION_SECONDS` 统计数据。
 * 只在全局视角统计。
@@ -773,7 +815,7 @@ Resin 需要做实事与历史的统计数据，用于 Dashboard 展示。
 * 全局视角、Platform 视角。
 
 #### 访问延迟
-* 统计最近的实际访问延迟分布。不包含 CONNECT 时长。给出分桶统计的结果。
+* 统计最近的实际访问延迟分布。不包含所有 `is_connect=true` 的隧道时长（HTTP `CONNECT` / SOCKS5 `CONNECT`）。给出分桶统计的结果。
 * 以 `UNIX_SECONDS % RESIN_METRIC_BUCKET_SECONDS == 0` 作为一个统计窗口。
 * 持久化到 `metrics.db`。
 * 全局视角、Platform 视角。
@@ -800,7 +842,7 @@ Resin 需要做实事与历史的统计数据，用于 Dashboard 展示。
 ### 统计实现
 
 #### 目标与边界
-* 统计覆盖数据面（Forward/Reverse 代理）与主动探测（ProbeManager）。
+* 统计覆盖数据面（HTTP 正向代理 / SOCKS5 正向代理 / 反向代理）与主动探测（ProbeManager）。
 * 控制面 API、GeoIP 下载、订阅下载不计入吞吐/请求/连接统计。
 * 热路径只允许 O(1) 原子更新，不允许 DB I/O、全局锁与高频内存分配。
 * 指标按两类管理：
@@ -817,6 +859,7 @@ Resin 需要做实事与历史的统计数据，用于 Dashboard 展示。
 #### 事件模型（统一输入）
 * `RequestFinishedEvent`：
   * 字段：`platform_id, proxy_type, is_connect, net_ok, duration_ns`。
+  * `proxy_type` 取值：1=HTTP 正向代理，2=反向代理，3=SOCKS5 正向代理。
   * 用于请求数、成功率、访问延迟分布。
 * `TrafficDeltaEvent`：
   * 字段：`ingress_bytes, egress_bytes`。
@@ -840,9 +883,9 @@ Resin 需要做实事与历史的统计数据，用于 Dashboard 展示。
 
 #### 连接数实现
 * 入站连接：
-  * 对 Forward/Reverse listener 统一包裹连接生命周期钩子。
+  * 对统一入站 listener 包裹连接生命周期钩子；同一 `RESIN_PORT` 上的 HTTP 与 SOCKS5 连接都计入。
   * `Accept` 成功记 `open`，`Close` 记 `close`。
-  * keep-alive idle 与 CONNECT hijack 后连接自然计入（直到 socket 关闭）。
+  * keep-alive idle、HTTP `CONNECT` hijack 后连接以及 SOCKS5 隧道连接自然计入（直到 socket 关闭）。
 * 出站连接：
   * 对统一 Dial 抽象层做包装（包括代理转发与 Probe 使用的 Dial）。
   * Dial 成功记 `open`，连接关闭记 `close`。
@@ -856,7 +899,7 @@ Resin 需要做实事与历史的统计数据，用于 Dashboard 展示。
 * 请求数与成功率（历史）：
   * 由 `RequestFinishedEvent` 聚合 `total_requests` 与 `success_requests`，维度为全局 + platform。
 * 访问延迟分布（历史）：
-  * 只统计非 CONNECT 请求；CONNECT 明确排除。
+  * 只统计 `is_connect=false` 的请求；HTTP `CONNECT` 与 SOCKS5 `CONNECT` 明确排除。
   * 使用固定延迟桶聚合（每 `RESIN_METRIC_LATENCY_BIN_WIDTH_MS` 一个桶，溢出桶是 `RESIN_METRIC_LATENCY_BIN_OVERFLOW_MS`），维度为全局 + platform。
 * 主动探测次数（历史）：
   * egress/latency probe 每发起一次请求记 1 次，维度为全局。
@@ -1103,6 +1146,38 @@ Body（partial patch 示例）：
 
 返回：更新后的 config。
 
+### Endpoint
+
+默认接入点的 `id` 固定为 `default`、`source` 为 `environment`、`read_only=true`。自定义接入点使用 UUID，保存于 `state.db`。
+
+```json
+{
+  "id": "uuid|default",
+  "port": 2260,
+  "enabled": true,
+  "allow_management": true,
+  "allow_proxy": true,
+  "require_proxy_auth_info": false,
+  "allow_http_forward": true,
+  "allow_http_reverse": true,
+  "allow_socks5": true,
+  "source": "environment|database",
+  "read_only": false,
+  "status": "active|starting|inactive|error",
+  "last_error": ""
+}
+```
+
+`enabled` 表示持久化的期望状态；`status` 与 `last_error` 表示 listener 的实际运行状态。两者可能在 listener 启动失败时不同，例如 `enabled=true`、`status=error`。
+
+* **GET** `/endpoints`：支持 `limit` / `offset` 分页；默认接入点置顶，其余按端口升序排列后分页，返回 `{ "items": [...], "total": 1, "limit": 50, "offset": 0 }`。
+* **POST** `/endpoints`：创建自定义接入点。请求可传 `enabled`；省略时默认为 `true` 并立即启动 listener，传 `false` 时只持久化配置且返回 `status=inactive`。
+* **GET** `/endpoints/{endpoint_id}`：读取单个接入点。
+* **PATCH** `/endpoints/{endpoint_id}`：更新 `enabled`、端口或能力。`enabled` 从 `true` 变为 `false` 时持久化禁用状态并关闭 listener；从 `false` 变为 `true` 时启动 listener，启动失败则回滚本次 patch。patch 后所有字段均未变化时直接返回当前状态，不写数据库、不更新 `updated_at`、不重新应用 listener。端口变更时先确认新 listener 可绑定，再关闭旧 listener；禁用状态下修改其他配置只保存配置，不启动 listener。
+* **DELETE** `/endpoints/{endpoint_id}`：删除自定义接入点并关闭 listener。
+
+端口范围为 1-65535 且全局唯一；管理页面与代理至少启用一项；启用代理时至少启用一种代理协议。默认接入点拒绝 PATCH 与 DELETE。
+
 ### Platform
 
 #### Platform 模型
@@ -1112,13 +1187,14 @@ Body（partial patch 示例）：
   "id": "uuid",
   "name": "Default",
   "sticky_ttl": "30m",
-  "regex_filters": ["^sub1/.*", ".*hk.*"],
+  "regex_filters": ["*^sub1/.*", ".*hk.*", "!过期"],
   "region_filters": ["hk","us"],
   "routable_node_count": 123,
   "reverse_proxy_miss_action": "TREAT_AS_EMPTY|REJECT",
   "reverse_proxy_empty_account_behavior": "RANDOM|FIXED_HEADER|ACCOUNT_HEADER_RULE",
   "reverse_proxy_fixed_account_header": "Authorization\nX-Account-Id",
   "allocation_policy": "BALANCED|PREFER_LOW_LATENCY|PREFER_IDLE_IP",
+  "passive_circuit_breaker_disabled": false,
   "updated_at": "2026-02-10T12:34:56Z"
 }
 ```
@@ -1145,24 +1221,26 @@ Body：
   "reverse_proxy_miss_action": "TREAT_AS_EMPTY",
   "reverse_proxy_empty_account_behavior": "ACCOUNT_HEADER_RULE",
   "reverse_proxy_fixed_account_header": "Authorization\nX-Account-Id",
-  "allocation_policy": "BALANCED"
+  "allocation_policy": "BALANCED",
+  "passive_circuit_breaker_disabled": false
 }
 ```
 
 字段要求：
 
 * 必填字段：`name`
-* 可选字段：`sticky_ttl`、`regex_filters`、`region_filters`、`reverse_proxy_miss_action`、`reverse_proxy_empty_account_behavior`、`reverse_proxy_fixed_account_header`、`allocation_policy`
+* 可选字段：`sticky_ttl`、`regex_filters`、`region_filters`、`reverse_proxy_miss_action`、`reverse_proxy_empty_account_behavior`、`reverse_proxy_fixed_account_header`、`allocation_policy`、`passive_circuit_breaker_disabled`
 * 不可传字段：`id`、`updated_at`、`routable_node_count`
-* 省略可选字段时，使用当前环境变量默认平台设置（`RESIN_DEFAULT_PLATFORM_*`）对应值
+* 省略可选字段时，平台策略字段使用当前环境变量默认平台设置（`RESIN_DEFAULT_PLATFORM_*`）对应值；`passive_circuit_breaker_disabled` 默认 `false`
 
 关键校验：
 
 * `name`：trim 后需非空、全局唯一；不能为保留名 `Default` 或 `api`（大小写不敏感）；且不能包含 `.:|/\@?#%~`、空格、tab、换行、回车。
 * `sticky_ttl`：合法 Go duration。
-* `regex_filters`：每项可被 regexp 编译。
+* `regex_filters`：节点标签过滤规则列表，语义与校验见“节点标签过滤规则”。
 * `region_filters`：每项为 ISO 3166-1 alpha-2 小写代码。
 * 枚举字段：`reverse_proxy_miss_action` 仅 `TREAT_AS_EMPTY|REJECT`；`reverse_proxy_empty_account_behavior` 仅 `RANDOM|FIXED_HEADER|ACCOUNT_HEADER_RULE`；`allocation_policy` 仅 `BALANCED|PREFER_LOW_LATENCY|PREFER_IDLE_IP`。
+* `passive_circuit_breaker_disabled`：布尔值。设为 `true` 后，此 Platform 的用户代理请求失败不会增加节点熔断计数；主动探测不受影响。成功请求仍会清除节点连续失败计数并可恢复熔断节点。
 * 组合约束：当 `reverse_proxy_empty_account_behavior=FIXED_HEADER` 时，`reverse_proxy_fixed_account_header` 必填；其值支持多行，每行一个合法 HTTP Header 字段名（会按顺序尝试提取）。
 
 错误码映射（最小集）：
@@ -1191,7 +1269,7 @@ Body（partial patch 示例）：
 字段要求：
 
 * 必填字段：无
-* 可改字段：`name`、`sticky_ttl`、`regex_filters`、`region_filters`、`reverse_proxy_miss_action`、`reverse_proxy_empty_account_behavior`、`reverse_proxy_fixed_account_header`、`allocation_policy`
+* 可改字段：`name`、`sticky_ttl`、`regex_filters`、`region_filters`、`reverse_proxy_miss_action`、`reverse_proxy_empty_account_behavior`、`reverse_proxy_fixed_account_header`、`allocation_policy`、`passive_circuit_breaker_disabled`
 * 不可改字段：`id`、`updated_at`、`routable_node_count`
 
 关键校验：与“创建平台”一致。
@@ -1263,7 +1341,7 @@ Body（partial patch 示例）：
 关键校验（最小集）：
 
 * `platform_id`：必须存在。
-* `platform_spec.regex_filters`：每项可被 regexp 编译。
+* `platform_spec.regex_filters`：同 Platform 的 `regex_filters`。
 * `platform_spec.region_filters`：每项为 ISO 3166-1 alpha-2 小写代码。
 
 错误码映射（最小集）：
@@ -1831,7 +1909,7 @@ Query（建议）：
 * `account`: 账号，可选
 * `target_host`: 目标主机，可选
 * `egress_ip`: 出口IP，可选
-* `proxy_type`: 代理类型，可选，1/2
+* `proxy_type`: 代理类型，可选。`1=HTTP 正向代理`，`2=反向代理`，`3=SOCKS5 正向代理`
 * `net_ok`: 网络是否成功，可选，`true`/`false`
 * `http_status`: HTTP状态码，可选
 * `fuzzy`: 是否启用模糊匹配，可选，`true`/`false`
@@ -1860,6 +1938,7 @@ Query（建议）：
       "node_tag": "sub-A/HK-01",
       "egress_ip": "1.2.3.4",
       "duration_ms": 532,
+      "first_byte_duration_ms": 120,
       "net_ok": true,
       "http_method": "GET",
       "http_status": 200,
@@ -1883,6 +1962,8 @@ Query（建议）：
   ]
 }
 ```
+
+说明：当 `proxy_type=3`（SOCKS5 正向代理）时，`target_url=""`、`http_method=""`、`http_status=0`；其余字段仍按统一请求日志契约返回。`first_byte_duration_ms=0` 表示未观测到上游首字节。
 
 #### 获取单条日志
 
@@ -2238,15 +2319,15 @@ GeoIP 与订阅的下载都有错误重试的需求。
 * RESIN_STATE_DIR：配置目录。默认 /var/lib/resin
 * RESIN_LOG_DIR：日志目录。默认 /var/log/resin
 * RESIN_LISTEN_ADDRESS：Resin 统一监听地址。默认 `0.0.0.0`
-* RESIN_PORT：Resin 单端口（控制面 API + 正向代理 + 反向代理 + WebUI）。默认 2260
-* RESIN_API_MAX_BODY_BYTES：控制面 API（`/api/*`）请求体最大字节数。超限返回 `413 PAYLOAD_TOO_LARGE`。仅作用于控制面，不作用于正/反向代理数据面。默认 1048576（1 MiB）。
+* RESIN_PORT：Resin 默认接入点端口（控制面 API + WebUI + HTTP 正向代理 + SOCKS5 正向代理 + 反向代理）。默认 2260；该接入点只读，自定义接入点保存在 `state.db`。
+* RESIN_API_MAX_BODY_BYTES：控制面 API（`/api/*`）请求体最大字节数。超限返回 `413 PAYLOAD_TOO_LARGE`。仅作用于控制面，不作用于 HTTP 正向代理 / SOCKS5 正向代理 / 反向代理数据面。默认 1048576（1 MiB）。
 
 核心设置：
 * `RESIN_MAX_LATENCY_TABLE_ENTRIES`：每个节点延迟表中“普通站点 LRU 区”的最大表项数。默认 12，最大 32（超限启动失败）。
 * `RESIN_PROBE_CONCURRENCY`：节点探测的最大并发数量。默认 1000，最大 10000（超限启动失败）。
 * `RESIN_GEOIP_UPDATE_SCHEDULE`：GeoIP 数据库自动更新的 Cron 表达式。默认 "0 7 * * *"。
 * `RESIN_DEFAULT_PLATFORM_STICKY_TTL`：默认平台粘性会话时长。默认 "168h"。
-* `RESIN_DEFAULT_PLATFORM_REGEX_FILTERS`：默认平台正则过滤器（JSON 字符串数组）。默认 `[]`。
+* `RESIN_DEFAULT_PLATFORM_REGEX_FILTERS`：默认平台节点标签过滤规则（JSON 字符串数组）。默认 `[]`。
 * `RESIN_DEFAULT_PLATFORM_REGION_FILTERS`：默认平台地区过滤器（JSON 字符串数组，小写 ISO 3166-1 alpha-2）。默认 `[]`。
 * `RESIN_DEFAULT_PLATFORM_REVERSE_PROXY_MISS_ACTION`：默认平台反代 miss 行为。枚举：`TREAT_AS_EMPTY|REJECT`。默认 `TREAT_AS_EMPTY`。
 * `RESIN_DEFAULT_PLATFORM_REVERSE_PROXY_EMPTY_ACCOUNT_BEHAVIOR`：默认平台在反代 Account 为空时的行为。枚举：`RANDOM|FIXED_HEADER|ACCOUNT_HEADER_RULE`。默认 `ACCOUNT_HEADER_RULE`。
@@ -2254,22 +2335,24 @@ GeoIP 与订阅的下载都有错误重试的需求。
 * `RESIN_DEFAULT_PLATFORM_ALLOCATION_POLICY`：默认平台分配策略。枚举：`BALANCED|PREFER_LOW_LATENCY|PREFER_IDLE_IP`。默认 `BALANCED`。
 * `RESIN_PROBE_TIMEOUT`：单次探测请求超时。默认 "15s"。
 * `RESIN_RESOURCE_FETCH_TIMEOUT`：资源下载（订阅/GeoIP）单次尝试超时。默认 "30s"。
+* `RESIN_NODE_DNS_UPSTREAMS`：Resin 托管节点域名解析上游，JSON 字符串数组。默认值为 `["https://doh.pub/dns-query","https://dns.alidns.com/dns-query","tls://223.5.5.5?sni=dns.alidns.com","local"]`；设置后完全按数组顺序作为 failover 链。仅作用于内部 sing-box builder 解析节点域名，不影响订阅下载、GeoIP 下载等其他资源下载路径。
+  * 支持：`local`、`udp://host[:port]`、`tcp://host[:port]`、`tls://host[:port]?sni=name`、`quic://host[:port]?sni=name`、`https://host[:port][/path]?sni=name&bootstrap=local`、`h3://host[:port][/path]?sni=name&bootstrap=local`。
+  * 默认端口由传输类型决定：UDP/TCP 为 53，DoT/DoQ 为 853，DoH/H3 为 443；DoH/H3 默认路径为 `/dns-query`。
+* `RESIN_PROXY_BYPASS`：不走代理节点的目标规则，默认空。用分号、逗号或换行分隔；命中规则的 HTTP 正向代理、SOCKS5 正向代理与反向代理请求会由 Resin 本机直连目标。支持精确主机、`*`/`?` 通配符、CIDR 网段与 `<local>`（无点号本地域名），例如 `localhost;127.*;10.*;172.16.0.0/12;192.168.*;<local>`。
 
 日志相关配置：
 * `RESIN_REQUEST_LOG_QUEUE_SIZE`：日志写入队列大小。至少是 RESIN_REQUEST_LOG_QUEUE_FLUSH_BATCH_SIZE 的两倍。默认 8192。
 * `RESIN_REQUEST_LOG_QUEUE_FLUSH_BATCH_SIZE`：批量写入数据库的大小。默认 4096.
 * `RESIN_REQUEST_LOG_QUEUE_FLUSH_INTERVAL`：写库间隔。默认 "5m"。
 * `RESIN_REQUEST_LOG_DB_MAX_MB`：SQLite 当前活动日志数据库的最大字节数。默认 512。
-* `RESIN_REQUEST_LOG_DB_RETAIN_COUNT`：保留的历史日志数据库文件数量（滚动日志），默认 5。
+* `RESIN_REQUEST_LOG_DB_RETAIN_COUNT`：保留的日志数据库文件总数（滚动日志），默认 2。
 
 认证设置：
-* `RESIN_AUTH_VERSION`：认证解析版本。必填。枚举：`LEGACY_V0|V1`。用于认证格式迁移。缺失或非法值时拒绝启动。
-  * `LEGACY_V0`：兼容旧认证格式，且禁用 V1 新格式解析
-  * `V1`：启用新认证格式，并在启动期执行 V1 兼容性校验（`RESIN_PROXY_TOKEN` 与历史 Platform 名称）。
+* 启动时会先加载当前工作目录下的 `.env` 文件（文件不存在则忽略；格式错误则拒绝启动）；系统或 shell 已设置的环境变量优先于 `.env`。
+* `RESIN_AUTH_VERSION`：可选的认证解析版本。未设置或为空时默认 `V1`；非空时仅允许 `V1`。
 * `RESIN_ADMIN_TOKEN`：访问 WebAPI 的认证 Token。环境变量必须定义；允许为空字符串。为空时关闭控制面鉴权。
-* `RESIN_PROXY_TOKEN`：访问代理的认证 Token。环境变量必须定义；允许为空字符串。为空时关闭正向/反向代理鉴权；非空时不能取保留值 `api`、`healthz`、`ui`。
-  * `LEGACY_V0`：非空时不能包含 `:` 或 `@`。
-  * `V1`：非空时不能包含 `.:|/\@?#%~`，且不能包含空格、tab、换行、回车。
+* `RESIN_PROXY_TOKEN`：访问代理的认证 Token。环境变量必须定义；允许为空字符串。为空时关闭 HTTP 正向代理 / 反向代理鉴权，并使 SOCKS5 允许 `NO AUTH`；非空时不能取保留值 `api`、`healthz`、`ui`，不能包含 `.:|/\@?#%~`，且不能包含空格、tab、换行、回车。
+  * 对 SOCKS5 而言：当 Token 非空时，RFC1929 密码必须等于 `RESIN_PROXY_TOKEN`；当 Token 为空时，仍可通过 RFC1929 的 `username` 字段传递 `Platform/Account` 身份。
 * 当 Token 非空但强度较弱时，WebUI 首页会显示安全告警条幅（不阻止启动）。
 
 数据统计设置：
@@ -2284,10 +2367,10 @@ GeoIP 与订阅的下载都有错误重试的需求。
 * `RESIN_METRIC_LATENCY_BIN_OVERFLOW_MS`：延迟统计溢出值，默认 3000ms。
 
 ### 节点默认 DNS 解析链
-Resin 托管节点的默认域名解析使用固定安全 DNS 链，不通过环境变量配置：
+Resin 托管节点的默认域名解析使用 `RESIN_NODE_DNS_UPSTREAMS` 的环境变量默认值：
 1. `https://doh.pub/dns-query`
 2. `https://dns.alidns.com/dns-query`
-3. `tls://223.5.5.5`
+3. `tls://223.5.5.5?sni=dns.alidns.com`
 4. `local`
 
 说明：
@@ -2295,6 +2378,7 @@ Resin 托管节点的默认域名解析使用固定安全 DNS 链，不通过环
 * 当前 3 个安全 DNS 上游全部失败时，降级回退到 `local`，保证节点仍可解析和连通。
 * `doh.pub` 与 `dns.alidns.com` 这两个 DoH 域名自身的 bootstrap 解析继续使用 `local`。
 * 此默认 DNS 链仅作用于 Resin 内部 sing-box builder 上下文中的默认域名解析；订阅下载、GeoIP 下载等其他下载路径仍保持原有行为。
+* 如需私有 DNS，可通过 `RESIN_NODE_DNS_UPSTREAMS` 覆盖默认链。该变量只接受 URI 字符串数组，例如 `["udp://10.0.0.53","local"]`；不支持对象格式，也不透传完整 sing-box DNS 配置。
 
 ### 运行时全局设置项（支持热更新）
 Resin 支持通过 API (`PATCH /system/config`) 动态调整大部分全局运行参数。配置文件存储于数据库。
@@ -2344,6 +2428,7 @@ WebUI 分为登录态与控制台态。未登录时进入登录页；登录后�
 * 平台管理
 * 订阅管理
 * 节点池
+* 接入点
 * 请求头规则
 * 请求日志
 * 资源
@@ -2396,6 +2481,11 @@ WebUI 分为登录态与控制台态。未登录时进入登录页；登录后�
 中部为节点表格，展示节点标签、出口、延迟、探测时间、失败次数、状态、创建时间等，并支持分页。
 
 点击表格行打开节点详情 Drawer，展示节点状态、别名标签与运维操作（出口探测、延迟探测）。
+
+## 接入点
+页面以分页的单列卡片按自然阅读顺序展示端口、运行状态、已启用能力和代理认证策略。
+
+默认接入点显示只读锁定状态。自定义接入点提供编辑与删除图标操作。
 
 ## 请求头规则
 页面顶部工具栏包含搜索、新建、调试、刷新。

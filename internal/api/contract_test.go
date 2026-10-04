@@ -291,6 +291,7 @@ func seedObservabilityData(
 			NodeTag:              "sub/tag-1",
 			EgressIP:             "8.8.8.8",
 			DurationNs:           int64(45 * time.Millisecond),
+			FirstByteDurationNs:  int64(12 * time.Millisecond),
 			NetOK:                true,
 			HTTPMethod:           "GET",
 			HTTPStatus:           200,
@@ -310,18 +311,19 @@ func seedObservabilityData(
 			RespBody:             []byte("resp-b-1"),
 		},
 		{
-			ID:          "log-contract-2",
-			StartedAtNs: time.Now().Add(-time.Minute).UnixNano(),
-			ProxyType:   proxy.ProxyTypeForward,
-			ClientIP:    "127.0.0.2",
-			PlatformID:  platformID,
-			Account:     "acct-2",
-			TargetHost:  "example.org",
-			TargetURL:   "https://example.org/resource",
-			DurationNs:  int64(12 * time.Millisecond),
-			NetOK:       false,
-			HTTPMethod:  "POST",
-			HTTPStatus:  502,
+			ID:                  "log-contract-2",
+			StartedAtNs:         time.Now().Add(-time.Minute).UnixNano(),
+			ProxyType:           proxy.ProxyTypeForward,
+			ClientIP:            "127.0.0.2",
+			PlatformID:          platformID,
+			Account:             "acct-2",
+			TargetHost:          "example.org",
+			TargetURL:           "https://example.org/resource",
+			DurationNs:          int64(12 * time.Millisecond),
+			FirstByteDurationNs: int64(5 * time.Millisecond),
+			NetOK:               false,
+			HTTPMethod:          "POST",
+			HTTPStatus:          502,
 		},
 	})
 	if err != nil {
@@ -988,6 +990,45 @@ func TestAPIContract_PlatformEmptyAccountBehavior(t *testing.T) {
 	assertErrorCode(t, rec, "INVALID_ARGUMENT")
 }
 
+func TestAPIContract_PlatformPassiveCircuitBreaker(t *testing.T) {
+	srv, _, _ := newControlPlaneTestServer(t)
+
+	rec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/platforms", map[string]any{
+		"name":                             "passive-breaker",
+		"passive_circuit_breaker_disabled": true,
+	}, true)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create status: got %d, want %d, body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	body := decodeJSONMap(t, rec)
+	if body["passive_circuit_breaker_disabled"] != true {
+		t.Fatalf("create passive_circuit_breaker_disabled: got %v, want true", body["passive_circuit_breaker_disabled"])
+	}
+	platformID, _ := body["id"].(string)
+	if platformID == "" {
+		t.Fatalf("create platform missing id: body=%s", rec.Body.String())
+	}
+
+	rec = doJSONRequest(t, srv, http.MethodPatch, "/api/v1/platforms/"+platformID, map[string]any{
+		"passive_circuit_breaker_disabled": false,
+	}, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	body = decodeJSONMap(t, rec)
+	if body["passive_circuit_breaker_disabled"] != false {
+		t.Fatalf("patch passive_circuit_breaker_disabled: got %v, want false", body["passive_circuit_breaker_disabled"])
+	}
+
+	rec = doJSONRequest(t, srv, http.MethodPatch, "/api/v1/platforms/"+platformID, map[string]any{
+		"passive_circuit_breaker_disabled": "false",
+	}, true)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("patch invalid status: got %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	assertErrorCode(t, rec, "INVALID_ARGUMENT")
+}
+
 func TestAPIContract_SystemConfigPatchSemantics(t *testing.T) {
 	srv, _, runtimeCfg := newControlPlaneTestServer(t)
 
@@ -1587,10 +1628,13 @@ func TestAPIContract_RequestLogEndpoints(t *testing.T) {
 	if !ok {
 		t.Fatalf("first item type: got %T", items[0])
 	}
-	for _, key := range []string{"resin_error", "upstream_stage", "upstream_err_kind", "upstream_errno", "upstream_err_msg"} {
+	for _, key := range []string{"first_byte_duration_ms", "resin_error", "upstream_stage", "upstream_err_kind", "upstream_errno", "upstream_err_msg"} {
 		if _, exists := firstItem[key]; !exists {
 			t.Fatalf("first item missing field %q", key)
 		}
+	}
+	if firstItem["first_byte_duration_ms"] != float64(5) {
+		t.Fatalf("first_byte_duration_ms: got %v, want 5", firstItem["first_byte_duration_ms"])
 	}
 
 	rec = doJSONRequest(
@@ -1706,10 +1750,13 @@ func TestAPIContract_RequestLogEndpoints(t *testing.T) {
 	if row["id"] != logID {
 		t.Fatalf("id: got %v, want %q", row["id"], logID)
 	}
-	for _, key := range []string{"resin_error", "upstream_stage", "upstream_err_kind", "upstream_errno", "upstream_err_msg"} {
+	for _, key := range []string{"first_byte_duration_ms", "resin_error", "upstream_stage", "upstream_err_kind", "upstream_errno", "upstream_err_msg"} {
 		if _, exists := row[key]; !exists {
 			t.Fatalf("row missing field %q", key)
 		}
+	}
+	if row["first_byte_duration_ms"] != float64(12) {
+		t.Fatalf("detail first_byte_duration_ms: got %v, want 12", row["first_byte_duration_ms"])
 	}
 	if row["payload_present"] != true {
 		t.Fatalf("payload_present: got %v, want true", row["payload_present"])
@@ -1742,6 +1789,45 @@ func TestAPIContract_RequestLogEndpoints(t *testing.T) {
 		t.Fatalf("invalid from status: got %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
 	}
 	assertErrorCode(t, rec, "INVALID_ARGUMENT")
+
+	inserted, err := requestlogRepo.InsertBatch([]proxy.RequestLogEntry{{
+		ID:          "log-contract-3",
+		StartedAtNs: time.Now().Add(-30 * time.Second).UnixNano(),
+		ProxyType:   proxy.ProxyTypeSocks5Forward,
+		ClientIP:    "127.0.0.3",
+		PlatformID:  platformID,
+		Account:     "acct-3",
+		TargetHost:  "example.net:443",
+		DurationNs:  int64(18 * time.Millisecond),
+		NetOK:       true,
+		HTTPStatus:  0,
+	}})
+	if err != nil {
+		t.Fatalf("insert socks5 request log: %v", err)
+	}
+	if inserted != 1 {
+		t.Fatalf("inserted socks5 logs: got %d, want %d", inserted, 1)
+	}
+
+	rec = doJSONRequest(t, srv, http.MethodGet, "/api/v1/request-logs?proxy_type=3", nil, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("proxy_type=3 status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	filteredBody := decodeJSONMap(t, rec)
+	filteredItems, ok := filteredBody["items"].([]any)
+	if !ok {
+		t.Fatalf("proxy_type=3 items type: got %T", filteredBody["items"])
+	}
+	if len(filteredItems) != 1 {
+		t.Fatalf("proxy_type=3 items len: got %d, want 1", len(filteredItems))
+	}
+	filteredRow, ok := filteredItems[0].(map[string]any)
+	if !ok {
+		t.Fatalf("proxy_type=3 row type: got %T", filteredItems[0])
+	}
+	if filteredRow["id"] != "log-contract-3" {
+		t.Fatalf("proxy_type=3 row id: got %v, want %q", filteredRow["id"], "log-contract-3")
+	}
 
 	invalidCases := []string{
 		"/api/v1/request-logs?limit=bad",

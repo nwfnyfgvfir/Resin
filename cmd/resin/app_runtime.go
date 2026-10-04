@@ -2,11 +2,9 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log"
 	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -27,34 +25,32 @@ import (
 	"github.com/Resinat/Resin/internal/routing"
 	"github.com/Resinat/Resin/internal/service"
 	"github.com/Resinat/Resin/internal/state"
+	"github.com/joho/godotenv"
 )
 
 type resinApp struct {
-	envCfg         *config.EnvConfig
-	runtimeCfg     *atomic.Pointer[config.RuntimeConfig]
-	accountMatcher *proxy.AccountMatcherRuntime
-	geoSvc         *geoip.Service
-	topoRuntime    *topologyRuntime
-	flushWorker    *state.CacheFlushWorker
-	metricsDB      *metrics.MetricsRepo
-	metricsManager *metrics.Manager
-	requestlogRepo *requestlog.Repo
-	requestlogSvc  *requestlog.Service
-	inboundHandler http.Handler
-	inboundSrv     *http.Server
-	inboundLn      net.Listener
-	socks5Proxy    *proxy.Socks5Proxy
-	socks5Ln       net.Listener
-	transportPool  *proxy.OutboundTransportPool
+	envCfg          *config.EnvConfig
+	runtimeCfg      *atomic.Pointer[config.RuntimeConfig]
+	accountMatcher  *proxy.AccountMatcherRuntime
+	geoSvc          *geoip.Service
+	topoRuntime     *topologyRuntime
+	flushWorker     *state.CacheFlushWorker
+	metricsDB       *metrics.MetricsRepo
+	metricsManager  *metrics.Manager
+	requestlogRepo  *requestlog.Repo
+	requestlogSvc   *requestlog.Service
+	endpointManager *endpointRuntimeManager
+	transportPool   *proxy.OutboundTransportPool
 }
 
 func run() error {
+	if err := loadDotenvFile(".env"); err != nil {
+		return err
+	}
+
 	envCfg, err := config.LoadEnvConfig()
 	if err != nil {
 		return err
-	}
-	if warning := authVersionStartupWarning(envCfg.AuthVersion); warning != "" {
-		startupWarnf("%s", warning)
 	}
 
 	engine, dbCloser, err := state.PersistenceBootstrapWithOptions(state.BootstrapOptions{
@@ -88,6 +84,16 @@ func run() error {
 	}
 	if runtimeErr != nil {
 		return fmt.Errorf("runtime server error: %w", runtimeErr)
+	}
+	return nil
+}
+
+func loadDotenvFile(path string) error {
+	if err := godotenv.Load(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("load %s: %w", path, err)
 	}
 	return nil
 }
@@ -415,7 +421,6 @@ func (a *resinApp) buildNetworkServers(engine *state.StateEngine) error {
 
 	forwardProxy := proxy.NewForwardProxy(proxy.ForwardProxyConfig{
 		ProxyToken:        a.envCfg.ProxyToken,
-		AuthVersion:       string(a.envCfg.AuthVersion),
 		Router:            a.topoRuntime.router,
 		Pool:              a.topoRuntime.pool,
 		Health:            a.topoRuntime.pool,
@@ -423,27 +428,11 @@ func (a *resinApp) buildNetworkServers(engine *state.StateEngine) error {
 		MetricsSink:       a.metricsManager,
 		OutboundTransport: outboundTransportCfg,
 		TransportPool:     a.transportPool,
+		ProxyBypassRules:  a.envCfg.ProxyBypassRules,
 	})
-	effectiveSocks5Port := socks5EffectivePort(a.envCfg)
-	if effectiveSocks5Port > 0 && a.envCfg.DeploymentProfile.AllowsSocks5TCP() {
-		a.socks5Proxy = proxy.NewSocks5Proxy(proxy.Socks5ProxyConfig{
-			ProxyToken:        a.envCfg.ProxyToken,
-			AuthVersion:       string(a.envCfg.AuthVersion),
-			DeploymentProfile: a.envCfg.DeploymentProfile,
-			AdvertiseHost:     a.envCfg.Socks5AdvertiseHost,
-			ListenAddress:     a.envCfg.ListenAddress,
-			ListenPort:        effectiveSocks5Port,
-			Router:            a.topoRuntime.router,
-			Pool:              a.topoRuntime.pool,
-			Health:            a.topoRuntime.pool,
-			Events:            proxyEvents,
-			MetricsSink:       a.metricsManager,
-		})
-	}
 
 	reverseProxy := proxy.NewReverseProxy(proxy.ReverseProxyConfig{
 		ProxyToken:        a.envCfg.ProxyToken,
-		AuthVersion:       string(a.envCfg.AuthVersion),
 		Router:            a.topoRuntime.router,
 		Pool:              a.topoRuntime.pool,
 		PlatformLookup:    a.topoRuntime.pool,
@@ -453,32 +442,56 @@ func (a *resinApp) buildNetworkServers(engine *state.StateEngine) error {
 		MetricsSink:       a.metricsManager,
 		OutboundTransport: outboundTransportCfg,
 		TransportPool:     a.transportPool,
+		ProxyBypassRules:  a.envCfg.ProxyBypassRules,
+	})
+	socks5Inbound := proxy.NewSocks5Inbound(proxy.Socks5InboundConfig{
+		ProxyToken:       a.envCfg.ProxyToken,
+		Router:           a.topoRuntime.router,
+		Pool:             a.topoRuntime.pool,
+		Health:           a.topoRuntime.pool,
+		Events:           proxyEvents,
+		MetricsSink:      a.metricsManager,
+		ProxyBypassRules: a.envCfg.ProxyBypassRules,
 	})
 
-	inboundHandler := newInboundMux(
+	endpointManager := newEndpointRuntimeManager(
+		a.envCfg.ListenAddress,
 		a.envCfg.ProxyToken,
 		forwardProxy,
 		reverseProxy,
 		apiSrv.Handler(),
 		tokenActionHandler,
+		socks5Inbound,
+		a.metricsManager,
 	)
-	a.inboundHandler = inboundHandler
-	inboundLn, err := net.Listen("tcp", formatListenAddress(a.envCfg.ListenAddress, a.envCfg.ResinPort))
+	cpService.EndpointRuntime = endpointManager
+	defaultEndpoint := service.NewDefaultEndpoint(a.envCfg.ResinPort)
+	if err := endpointManager.ApplyEndpoint(defaultEndpoint); err != nil {
+		return fmt.Errorf("default endpoint listen: %w", err)
+	}
+	if err := restorePersistedEndpoints(engine, endpointManager); err != nil {
+		endpointManager.RemoveEndpoint(service.DefaultEndpointID)
+		return fmt.Errorf("load endpoints: %w", err)
+	}
+	a.endpointManager = endpointManager
+
+	return nil
+}
+
+func restorePersistedEndpoints(engine *state.StateEngine, endpointManager *endpointRuntimeManager) error {
+	customEndpoints, err := engine.ListEndpoints()
 	if err != nil {
-		return fmt.Errorf("resin server listen: %w", err)
+		return err
 	}
-	a.inboundLn = proxy.NewCountingListener(inboundLn, a.metricsManager)
-	a.inboundSrv = &http.Server{Handler: inboundHandler}
-
-	if a.socks5Proxy != nil && socks5PortExposedSeparately(a.envCfg) {
-		socks5Ln, err := net.Listen("tcp", formatListenAddress(a.envCfg.ListenAddress, a.envCfg.Socks5Port))
-		if err != nil {
-			_ = a.inboundLn.Close()
-			return fmt.Errorf("socks5 server listen: %w", err)
+	for _, endpoint := range customEndpoints {
+		if !endpoint.Enabled {
+			continue
 		}
-		a.socks5Ln = proxy.NewCountingListener(socks5Ln, a.metricsManager)
+		if err := endpointManager.ApplyEndpoint(endpoint); err != nil {
+			endpointManager.RecordEndpointError(endpoint, err)
+			log.Printf("Endpoint %s on port %d unavailable: %v", endpoint.ID, endpoint.Port, err)
+		}
 	}
-
 	return nil
 }
 
@@ -509,44 +522,12 @@ func (a *resinApp) buildProxyEvents() proxy.ConfigAwareEventEmitter {
 }
 
 func (a *resinApp) startServers() <-chan error {
-	serverErrCh := make(chan error, 1)
-	reportServerErr := func(name string, err error) {
-		if err == nil || errors.Is(err, http.ErrServerClosed) {
-			return
-		}
-		wrapped := fmt.Errorf("%s: %w", name, err)
-		select {
-		case serverErrCh <- wrapped:
-		default:
-		}
-	}
-
-	if a.envCfg != nil && a.envCfg.DeploymentProfile.SharesSocks5OnResinPort() && a.socks5Proxy != nil {
-		go func() {
-			log.Printf("Resin mixed inbound server starting on %s (%s)", formatListenURL(a.envCfg.ListenAddress, a.envCfg.ResinPort), describeDeploymentProfileBehavior(a.envCfg))
-			for {
-				conn, err := a.inboundLn.Accept()
-				if err != nil {
-					reportServerErr("resin mixed inbound server", err)
-					return
-				}
-				go serveMixedInboundConn(conn, a.envCfg.DeploymentProfile, a.inboundHandler, a.socks5Proxy)
-			}
-		}()
-	} else {
-		go func() {
-			log.Printf("Resin server starting on %s", formatListenURL(a.envCfg.ListenAddress, a.envCfg.ResinPort))
-			reportServerErr("resin server", a.inboundSrv.Serve(a.inboundLn))
-		}()
-	}
-	if a.socks5Proxy != nil && a.socks5Ln != nil {
-		go func() {
-			log.Printf("SOCKS5 server starting on %s", describeSocks5Listener(a.envCfg))
-			reportServerErr("socks5 server", a.socks5Proxy.Serve(a.socks5Ln))
-		}()
-	}
-
-	return serverErrCh
+	log.Printf(
+		"Resin default endpoint starting on %s (%s)",
+		formatListenAddress(a.envCfg.ListenAddress, a.envCfg.ResinPort),
+		"HTTP + SOCKS5",
+	)
+	return a.endpointManager.Start()
 }
 
 func waitForShutdown(serverErrCh <-chan error) error {
@@ -573,13 +554,7 @@ func formatListenURL(listenAddress string, port int) string {
 }
 
 func (a *resinApp) shutdown(ctx context.Context) {
-	if a.socks5Ln != nil {
-		if err := a.socks5Ln.Close(); err != nil {
-			log.Printf("SOCKS5 server close error: %v", err)
-		}
-		log.Println("SOCKS5 server stopped")
-	}
-	if err := a.inboundSrv.Shutdown(ctx); err != nil {
+	if err := a.endpointManager.Shutdown(ctx); err != nil {
 		log.Printf("Server shutdown error: %v", err)
 	}
 	log.Println("Resin server stopped")

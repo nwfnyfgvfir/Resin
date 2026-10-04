@@ -2016,9 +2016,13 @@ func parseProxyURI(uri string) (ParsedNode, bool) {
 		return ParsedNode{}, false
 	}
 	tag := decodeTag(u.Fragment)
+	defaultTagProto := nodeType
+	if scheme == "https" {
+		defaultTagProto = scheme
+	}
 	outbound := map[string]any{
 		"type":        nodeType,
-		"tag":         defaultTag(tag, nodeType, server, port),
+		"tag":         defaultTag(tag, defaultTagProto, server, port),
 		"server":      server,
 		"server_port": port,
 	}
@@ -2229,10 +2233,13 @@ func parseNetchURI(uri string) (ParsedNode, bool) {
 			"method":      method,
 			"password":    password,
 		}
-		if plugin := strings.TrimSpace(getString(nodeMap, "Plugin")); plugin != "" {
+		plugin := strings.TrimSpace(getString(nodeMap, "Plugin"))
+		pluginOpts := strings.TrimSpace(getString(nodeMap, "PluginOption"))
+		plugin, pluginOpts = normalizeSSPlugin(plugin, pluginOpts)
+		if plugin != "" {
 			outbound["plugin"] = plugin
 		}
-		if pluginOpts := strings.TrimSpace(getString(nodeMap, "PluginOption")); pluginOpts != "" {
+		if pluginOpts != "" {
 			outbound["plugin_opts"] = pluginOpts
 		}
 		return buildParsedNode(outbound)
@@ -2613,6 +2620,7 @@ func parseSSDURI(uri string) ([]ParsedNode, bool) {
 			getString(server, "plugin_opts"),
 			defaultPluginOpts,
 		))
+		plugin, pluginOpts = normalizeSSPlugin(plugin, pluginOpts)
 		if plugin != "" {
 			outbound["plugin"] = plugin
 		}
@@ -3539,17 +3547,18 @@ func parseSSPluginFromQuery(rawQuery string) (plugin string, pluginOpts string) 
 					query.Get("plugin_opts"),
 				))
 				if pluginOpts == "" && rawOpts != "" {
-					if optsPlugin, optsValue := splitSSPluginSpec(rawOpts); optsPlugin != "" && optsValue != "" && strings.EqualFold(optsPlugin, plugin) {
+					if optsPlugin, optsValue := splitSSPluginSpec(rawOpts); optsPlugin != "" && optsValue != "" && canonicalSSPluginName(optsPlugin) == canonicalSSPluginName(plugin) {
 						pluginOpts = optsValue
 					} else {
 						pluginOpts = rawOpts
 					}
 				}
-				return plugin, pluginOpts
+				return normalizeSSPlugin(plugin, pluginOpts)
 			}
 		}
 		if spec := strings.TrimSpace(firstNonEmpty(query.Get("plugin-opts"), query.Get("plugin_opts"))); spec != "" {
-			return splitSSPluginSpec(spec)
+			plugin, pluginOpts = splitSSPluginSpec(spec)
+			return normalizeSSPlugin(plugin, pluginOpts)
 		}
 	}
 
@@ -3557,7 +3566,8 @@ func parseSSPluginFromQuery(rawQuery string) (plugin string, pluginOpts string) 
 	if spec == "" {
 		return "", ""
 	}
-	return splitSSPluginSpec(spec)
+	plugin, pluginOpts = splitSSPluginSpec(spec)
+	return normalizeSSPlugin(plugin, pluginOpts)
 }
 
 func extractSSPluginSpecFromRawQuery(rawQuery string) string {
@@ -3588,7 +3598,7 @@ func splitSSPluginSpec(spec string) (plugin string, pluginOpts string) {
 	if spec == "" {
 		return "", ""
 	}
-	parts := strings.Split(spec, ";")
+	parts := splitUnescaped(spec, ';')
 	plugin = strings.TrimSpace(parts[0])
 	if plugin == "" {
 		return "", ""
@@ -3604,6 +3614,106 @@ func splitSSPluginSpec(spec string) (plugin string, pluginOpts string) {
 		}
 	}
 	return plugin, strings.Join(rest, ";")
+}
+
+func normalizeSSPlugin(plugin string, pluginOpts string) (string, string) {
+	plugin = strings.TrimSpace(plugin)
+	pluginOpts = strings.TrimSpace(pluginOpts)
+	switch canonicalSSPluginName(plugin) {
+	case "obfs-local":
+		return "obfs-local", normalizeSimpleObfsOptions(pluginOpts)
+	default:
+		return plugin, pluginOpts
+	}
+}
+
+func canonicalSSPluginName(plugin string) string {
+	switch strings.ToLower(strings.TrimSpace(plugin)) {
+	case "obfs", "simple-obfs", "obfs-local":
+		return "obfs-local"
+	default:
+		return strings.ToLower(strings.TrimSpace(plugin))
+	}
+}
+
+func normalizeSimpleObfsOptions(pluginOpts string) string {
+	if pluginOpts == "" {
+		return ""
+	}
+	parts := splitUnescaped(pluginOpts, ';')
+	var obfsValue string
+	var hostValue string
+	extras := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		key, value, hasValue := cutUnescaped(part, '=')
+		if !hasValue {
+			if canonicalSSPluginName(part) == "obfs-local" {
+				continue
+			}
+			extras = append(extras, part)
+			continue
+		}
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		switch strings.ToLower(key) {
+		case "mode", "obfs":
+			if value != "" && obfsValue == "" {
+				obfsValue = value
+			}
+		case "host", "obfs-host", "obfs_host":
+			if value != "" && hostValue == "" {
+				hostValue = value
+			}
+		default:
+			extras = append(extras, key+"="+value)
+		}
+	}
+	normalized := make([]string, 0, 2+len(extras))
+	if obfsValue != "" {
+		normalized = append(normalized, "obfs="+obfsValue)
+	}
+	if hostValue != "" {
+		normalized = append(normalized, "obfs-host="+hostValue)
+	}
+	normalized = append(normalized, extras...)
+	return strings.Join(normalized, ";")
+}
+
+func splitUnescaped(input string, delimiter byte) []string {
+	parts := make([]string, 0, 1)
+	start := 0
+	escaped := false
+	for i := 0; i < len(input); i++ {
+		switch {
+		case escaped:
+			escaped = false
+		case input[i] == '\\':
+			escaped = true
+		case input[i] == delimiter:
+			parts = append(parts, input[start:i])
+			start = i + 1
+		}
+	}
+	return append(parts, input[start:])
+}
+
+func cutUnescaped(input string, delimiter byte) (string, string, bool) {
+	escaped := false
+	for i := 0; i < len(input); i++ {
+		switch {
+		case escaped:
+			escaped = false
+		case input[i] == '\\':
+			escaped = true
+		case input[i] == delimiter:
+			return input[:i], input[i+1:], true
+		}
+	}
+	return input, "", false
 }
 
 func parsePositiveUint64(raw string) (uint64, bool) {
@@ -3850,6 +3960,7 @@ func setSSPluginFromClash(outbound map[string]any, proxy map[string]any) {
 	if plugin == "" {
 		return
 	}
+	plugin, pluginOpts = normalizeSSPlugin(plugin, pluginOpts)
 	outbound["plugin"] = plugin
 	if pluginOpts != "" {
 		outbound["plugin_opts"] = pluginOpts

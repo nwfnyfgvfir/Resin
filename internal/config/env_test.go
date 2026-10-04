@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -18,7 +19,7 @@ func setEnvs(t *testing.T, envs map[string]string) {
 // requiredEnvs returns the minimum env vars needed for LoadEnvConfig to succeed.
 func requiredEnvs() map[string]string {
 	return map[string]string{
-		"RESIN_AUTH_VERSION": "LEGACY_V0",
+		"RESIN_AUTH_VERSION": "V1",
 		"RESIN_ADMIN_TOKEN":  "admin-secret",
 		"RESIN_PROXY_TOKEN":  "proxy-secret",
 	}
@@ -72,18 +73,24 @@ func TestLoadEnvConfig_Defaults(t *testing.T) {
 	assertEqual(t, "DefaultPlatformAllocationPolicy", cfg.DefaultPlatformAllocationPolicy, "BALANCED")
 	assertEqual(t, "ProbeTimeout", cfg.ProbeTimeout, 15*time.Second)
 	assertEqual(t, "ResourceFetchTimeout", cfg.ResourceFetchTimeout, 30*time.Second)
+	assertEqual(t, "NodeDNSUpstreamsLength", len(cfg.NodeDNSUpstreams), 4)
+	assertEqual(t, "NodeDNSUpstreams[0]", cfg.NodeDNSUpstreams[0], "https://doh.pub/dns-query")
+	assertEqual(t, "NodeDNSUpstreams[1]", cfg.NodeDNSUpstreams[1], "https://dns.alidns.com/dns-query")
+	assertEqual(t, "NodeDNSUpstreams[2]", cfg.NodeDNSUpstreams[2], "tls://223.5.5.5?sni=dns.alidns.com")
+	assertEqual(t, "NodeDNSUpstreams[3]", cfg.NodeDNSUpstreams[3], "local")
 	assertEqual(t, "ProxyTransportMaxIdleConns", cfg.ProxyTransportMaxIdleConns, 1024)
 	assertEqual(t, "ProxyTransportMaxIdleConnsPerHost", cfg.ProxyTransportMaxIdleConnsPerHost, 64)
 	assertEqual(t, "ProxyTransportIdleConnTimeout", cfg.ProxyTransportIdleConnTimeout, 90*time.Second)
+	assertEqual(t, "ProxyBypassRulesLength", len(cfg.ProxyBypassRules), 0)
 
 	// Request log
 	assertEqual(t, "RequestLogQueueSize", cfg.RequestLogQueueSize, 8192)
 	assertEqual(t, "RequestLogQueueFlushBatchSize", cfg.RequestLogQueueFlushBatchSize, 4096)
 	assertEqual(t, "RequestLogDBMaxMB", cfg.RequestLogDBMaxMB, 512)
-	assertEqual(t, "RequestLogDBRetainCount", cfg.RequestLogDBRetainCount, 5)
+	assertEqual(t, "RequestLogDBRetainCount", cfg.RequestLogDBRetainCount, 2)
 
 	// Auth
-	assertEqual(t, "AuthVersion", cfg.AuthVersion, AuthVersionLegacyV0)
+	assertEqual(t, "AuthVersion", cfg.AuthVersion, AuthVersionV1)
 
 	// Metrics
 	assertEqual(t, "MetricThroughputIntervalSeconds", cfg.MetricThroughputIntervalSeconds, 2)
@@ -121,9 +128,11 @@ func TestLoadEnvConfig_EnvOverrides(t *testing.T) {
 	envs["RESIN_DEFAULT_PLATFORM_ALLOCATION_POLICY"] = "PREFER_LOW_LATENCY"
 	envs["RESIN_PROBE_TIMEOUT"] = "20s"
 	envs["RESIN_RESOURCE_FETCH_TIMEOUT"] = "45s"
+	envs["RESIN_NODE_DNS_UPSTREAMS"] = `["udp://10.0.0.53","local"]`
 	envs["RESIN_PROXY_TRANSPORT_MAX_IDLE_CONNS"] = "2048"
 	envs["RESIN_PROXY_TRANSPORT_MAX_IDLE_CONNS_PER_HOST"] = "128"
 	envs["RESIN_PROXY_TRANSPORT_IDLE_CONN_TIMEOUT"] = "2m"
+	envs["RESIN_PROXY_BYPASS"] = "localhost;127.*; 192.168.*\n<local>,10.0.0.0/8"
 	envs["RESIN_REQUEST_LOG_QUEUE_FLUSH_INTERVAL"] = "10m"
 	setEnvs(t, envs)
 
@@ -167,9 +176,18 @@ func TestLoadEnvConfig_EnvOverrides(t *testing.T) {
 	assertEqual(t, "DefaultPlatformAllocationPolicy", cfg.DefaultPlatformAllocationPolicy, "PREFER_LOW_LATENCY")
 	assertEqual(t, "ProbeTimeout", cfg.ProbeTimeout, 20*time.Second)
 	assertEqual(t, "ResourceFetchTimeout", cfg.ResourceFetchTimeout, 45*time.Second)
+	assertEqual(t, "NodeDNSUpstreamsLength", len(cfg.NodeDNSUpstreams), 2)
+	assertEqual(t, "NodeDNSUpstreams[0]", cfg.NodeDNSUpstreams[0], "udp://10.0.0.53")
+	assertEqual(t, "NodeDNSUpstreams[1]", cfg.NodeDNSUpstreams[1], "local")
 	assertEqual(t, "ProxyTransportMaxIdleConns", cfg.ProxyTransportMaxIdleConns, 2048)
 	assertEqual(t, "ProxyTransportMaxIdleConnsPerHost", cfg.ProxyTransportMaxIdleConnsPerHost, 128)
 	assertEqual(t, "ProxyTransportIdleConnTimeout", cfg.ProxyTransportIdleConnTimeout, 2*time.Minute)
+	assertEqual(t, "ProxyBypassRulesLength", len(cfg.ProxyBypassRules), 5)
+	assertEqual(t, "ProxyBypassRules[0]", cfg.ProxyBypassRules[0], "localhost")
+	assertEqual(t, "ProxyBypassRules[1]", cfg.ProxyBypassRules[1], "127.*")
+	assertEqual(t, "ProxyBypassRules[2]", cfg.ProxyBypassRules[2], "192.168.*")
+	assertEqual(t, "ProxyBypassRules[3]", cfg.ProxyBypassRules[3], "<local>")
+	assertEqual(t, "ProxyBypassRules[4]", cfg.ProxyBypassRules[4], "10.0.0.0/8")
 	if cfg.RequestLogQueueFlushInterval.String() != "10m0s" {
 		t.Errorf("RequestLogQueueFlushInterval: got %v, want 10m", cfg.RequestLogQueueFlushInterval)
 	}
@@ -209,8 +227,32 @@ func TestLoadEnvConfig_DefaultPlatformRegionFilters_Negation(t *testing.T) {
 	assertEqual(t, "DefaultPlatformRegionFilters[1]", cfg.DefaultPlatformRegionFilters[1], "us")
 }
 
+func TestLoadEnvConfig_NodeDNSUpstreamsRejectsEmptyList(t *testing.T) {
+	envs := requiredEnvs()
+	envs["RESIN_NODE_DNS_UPSTREAMS"] = `[]`
+	setEnvs(t, envs)
+
+	_, err := LoadEnvConfig()
+	if err == nil {
+		t.Fatal("expected error for empty RESIN_NODE_DNS_UPSTREAMS")
+	}
+	assertContains(t, err.Error(), "RESIN_NODE_DNS_UPSTREAMS must contain at least one DNS upstream when defined")
+}
+
+func TestLoadEnvConfig_NodeDNSUpstreamsRejectsObjectFormat(t *testing.T) {
+	envs := requiredEnvs()
+	envs["RESIN_NODE_DNS_UPSTREAMS"] = `[{"type":"udp","server":"10.0.0.53"}]`
+	setEnvs(t, envs)
+
+	_, err := LoadEnvConfig()
+	if err == nil {
+		t.Fatal("expected error for object-style RESIN_NODE_DNS_UPSTREAMS")
+	}
+	assertContains(t, err.Error(), "RESIN_NODE_DNS_UPSTREAMS: invalid JSON string array")
+}
+
 func TestLoadEnvConfig_MissingAdminToken(t *testing.T) {
-	t.Setenv("RESIN_AUTH_VERSION", "LEGACY_V0")
+	t.Setenv("RESIN_AUTH_VERSION", "V1")
 	t.Setenv("RESIN_PROXY_TOKEN", "proxy-secret")
 	// Ensure RESIN_ADMIN_TOKEN is not set
 	os.Unsetenv("RESIN_ADMIN_TOKEN")
@@ -219,11 +261,11 @@ func TestLoadEnvConfig_MissingAdminToken(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for missing RESIN_ADMIN_TOKEN")
 	}
-	assertContains(t, err.Error(), "RESIN_ADMIN_TOKEN must be defined (can be empty)")
+	assertContains(t, err.Error(), "RESIN_ADMIN_TOKEN must be defined. If you intend to use an empty token, please set it explicitly (e.g., RESIN_ADMIN_TOKEN=).")
 }
 
 func TestLoadEnvConfig_MissingProxyToken(t *testing.T) {
-	t.Setenv("RESIN_AUTH_VERSION", "LEGACY_V0")
+	t.Setenv("RESIN_AUTH_VERSION", "V1")
 	t.Setenv("RESIN_ADMIN_TOKEN", "admin-secret")
 	os.Unsetenv("RESIN_PROXY_TOKEN")
 
@@ -231,7 +273,7 @@ func TestLoadEnvConfig_MissingProxyToken(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for missing RESIN_PROXY_TOKEN")
 	}
-	assertContains(t, err.Error(), "RESIN_PROXY_TOKEN must be defined (can be empty)")
+	assertContains(t, err.Error(), "RESIN_PROXY_TOKEN must be defined. If you intend to use an empty token, please set it explicitly (e.g., RESIN_PROXY_TOKEN=).")
 }
 
 func TestLoadEnvConfig_PostgresRequiresDatabaseURL(t *testing.T) {
@@ -252,29 +294,44 @@ func TestLoadEnvConfig_MissingAuthVersion(t *testing.T) {
 	t.Setenv("RESIN_PROXY_TOKEN", "proxy-secret")
 	os.Unsetenv("RESIN_AUTH_VERSION")
 
-	_, err := LoadEnvConfig()
-	if err == nil {
-		t.Fatal("expected error for missing RESIN_AUTH_VERSION")
+	cfg, err := LoadEnvConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	assertContains(t, err.Error(), "RESIN_AUTH_VERSION must be defined")
-	assertContains(t, err.Error(), "set RESIN_AUTH_VERSION=LEGACY_V0 first for compatibility")
-	assertContains(t, err.Error(), AuthMigrationGuideURL)
+	assertEqual(t, "AuthVersion", cfg.AuthVersion, AuthVersionV1)
 }
 
-func TestLoadEnvConfig_InvalidAuthVersion(t *testing.T) {
-	t.Setenv("RESIN_AUTH_VERSION", "V2")
+func TestLoadEnvConfig_EmptyAuthVersionDefaultsToV1(t *testing.T) {
+	t.Setenv("RESIN_AUTH_VERSION", "  ")
 	t.Setenv("RESIN_ADMIN_TOKEN", "admin-secret")
 	t.Setenv("RESIN_PROXY_TOKEN", "proxy-secret")
 
-	_, err := LoadEnvConfig()
-	if err == nil {
-		t.Fatal("expected error for invalid RESIN_AUTH_VERSION")
+	cfg, err := LoadEnvConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	assertContains(t, err.Error(), "RESIN_AUTH_VERSION: invalid value")
+	assertEqual(t, "AuthVersion", cfg.AuthVersion, AuthVersionV1)
+}
+
+func TestLoadEnvConfig_InvalidAuthVersion(t *testing.T) {
+	for _, value := range []string{"V2", "LEGACY_V0"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("RESIN_AUTH_VERSION", value)
+			t.Setenv("RESIN_ADMIN_TOKEN", "admin-secret")
+			t.Setenv("RESIN_PROXY_TOKEN", "proxy-secret")
+
+			_, err := LoadEnvConfig()
+			if err == nil {
+				t.Fatal("expected error for invalid RESIN_AUTH_VERSION")
+			}
+			assertContains(t, err.Error(), "RESIN_AUTH_VERSION: invalid value")
+			assertContains(t, err.Error(), "allowed: V1")
+		})
+	}
 }
 
 func TestLoadEnvConfig_EmptyTokensAllowedWhenDefined(t *testing.T) {
-	t.Setenv("RESIN_AUTH_VERSION", "LEGACY_V0")
+	t.Setenv("RESIN_AUTH_VERSION", "V1")
 	t.Setenv("RESIN_ADMIN_TOKEN", "")
 	t.Setenv("RESIN_PROXY_TOKEN", "")
 
@@ -286,34 +343,11 @@ func TestLoadEnvConfig_EmptyTokensAllowedWhenDefined(t *testing.T) {
 	assertEqual(t, "ProxyToken", cfg.ProxyToken, "")
 }
 
-func TestLoadEnvConfig_ProxyTokenForbiddenChars(t *testing.T) {
-	tests := []struct {
-		name  string
-		token string
-	}{
-		{"colon", "bad:token"},
-		{"at", "bad@token"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("RESIN_AUTH_VERSION", "LEGACY_V0")
-			t.Setenv("RESIN_ADMIN_TOKEN", "admin-secret")
-			t.Setenv("RESIN_PROXY_TOKEN", tc.token)
-
-			_, err := LoadEnvConfig()
-			if err == nil {
-				t.Fatal("expected error for forbidden char in RESIN_PROXY_TOKEN")
-			}
-			assertContains(t, err.Error(), "must not contain")
-		})
-	}
-}
-
 func TestLoadEnvConfig_ProxyTokenReservedKeywords(t *testing.T) {
 	tests := []string{"api", "healthz", "ui"}
 	for _, token := range tests {
 		t.Run(token, func(t *testing.T) {
-			t.Setenv("RESIN_AUTH_VERSION", "LEGACY_V0")
+			t.Setenv("RESIN_AUTH_VERSION", "V1")
 			t.Setenv("RESIN_ADMIN_TOKEN", "admin-secret")
 			t.Setenv("RESIN_PROXY_TOKEN", token)
 
@@ -357,21 +391,8 @@ func TestLoadEnvConfig_ProxyTokenForbiddenChars_V1(t *testing.T) {
 				t.Fatal("expected error for forbidden char in RESIN_PROXY_TOKEN when V1")
 			}
 			assertContains(t, err.Error(), "RESIN_PROXY_TOKEN:")
-			assertContains(t, err.Error(), AuthMigrationGuideURL)
 		})
 	}
-}
-
-func TestLoadEnvConfig_ProxyTokenLegacyAllowsDot(t *testing.T) {
-	t.Setenv("RESIN_AUTH_VERSION", "LEGACY_V0")
-	t.Setenv("RESIN_ADMIN_TOKEN", "admin-secret")
-	t.Setenv("RESIN_PROXY_TOKEN", "proxy.token")
-
-	cfg, err := LoadEnvConfig()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	assertEqual(t, "ProxyToken", cfg.ProxyToken, "proxy.token")
 }
 
 func TestLoadEnvConfig_EmptyListenAddress(t *testing.T) {
@@ -644,6 +665,21 @@ func TestLoadEnvConfig_InvalidDefaultPlatformRegex(t *testing.T) {
 		t.Fatal("expected error for invalid default platform regex")
 	}
 	assertContains(t, err.Error(), "RESIN_DEFAULT_PLATFORM_REGEX_FILTERS")
+}
+
+func TestLoadEnvConfig_DefaultPlatformRegexRuleSyntax(t *testing.T) {
+	envs := requiredEnvs()
+	envs["RESIN_DEFAULT_PLATFORM_REGEX_FILTERS"] = `["hk","*fast","!expired","\\!literal"]`
+	setEnvs(t, envs)
+
+	cfg, err := LoadEnvConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []string{"hk", "*fast", "!expired", `\!literal`}
+	if !reflect.DeepEqual(cfg.DefaultPlatformRegexFilters, want) {
+		t.Fatalf("default platform regex rules: got %v, want %v", cfg.DefaultPlatformRegexFilters, want)
+	}
 }
 
 func TestLoadEnvConfig_InvalidProbeTimeout(t *testing.T) {

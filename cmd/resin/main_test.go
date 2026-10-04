@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -18,6 +19,24 @@ import (
 	"github.com/Resinat/Resin/internal/testutil"
 	"github.com/Resinat/Resin/internal/topology"
 )
+
+func unsetEnvForDotenvTest(t *testing.T, keys ...string) {
+	t.Helper()
+	for _, key := range keys {
+		oldValue, hadOldValue := os.LookupEnv(key)
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatalf("Unsetenv(%s): %v", key, err)
+		}
+		key := key
+		t.Cleanup(func() {
+			if hadOldValue {
+				_ = os.Setenv(key, oldValue)
+			} else {
+				_ = os.Unsetenv(key)
+			}
+		})
+	}
+}
 
 func newBootstrapTestRuntime(runtimeCfg *config.RuntimeConfig) (*topology.SubscriptionManager, *topology.GlobalNodePool) {
 	subManager := topology.NewSubscriptionManager()
@@ -35,7 +54,7 @@ func newBootstrapTestRuntime(runtimeCfg *config.RuntimeConfig) (*topology.Subscr
 
 func newDefaultPlatformEnvConfig() *config.EnvConfig {
 	return &config.EnvConfig{
-		AuthVersion:                                     config.AuthVersionLegacyV0,
+		AuthVersion:                                     config.AuthVersionV1,
 		DefaultPlatformStickyTTL:                        7 * 24 * time.Hour,
 		DefaultPlatformRegexFilters:                     []string{},
 		DefaultPlatformRegionFilters:                    []string{},
@@ -43,26 +62,75 @@ func newDefaultPlatformEnvConfig() *config.EnvConfig {
 		DefaultPlatformReverseProxyEmptyAccountBehavior: "ACCOUNT_HEADER_RULE",
 		DefaultPlatformReverseProxyFixedAccountHeader:   "Authorization",
 		DefaultPlatformAllocationPolicy:                 "BALANCED",
+		NodeDNSUpstreams:                                config.DefaultNodeDNSUpstreams(),
 	}
 }
 
-func TestAuthVersionStartupWarning_LegacyV0(t *testing.T) {
-	msg := authVersionStartupWarning(config.AuthVersionLegacyV0)
-	if msg == "" {
-		t.Fatal("expected warning message for LEGACY_V0")
+func TestLoadDotenvFile_LoadsEmptyProxyToken(t *testing.T) {
+	unsetEnvForDotenvTest(t, "RESIN_AUTH_VERSION", "RESIN_ADMIN_TOKEN", "RESIN_PROXY_TOKEN")
+
+	path := filepath.Join(t.TempDir(), ".env")
+	content := strings.Join([]string{
+		"RESIN_AUTH_VERSION=V1",
+		"RESIN_ADMIN_TOKEN=admin-secret",
+		"RESIN_PROXY_TOKEN=",
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("WriteFile(.env): %v", err)
 	}
-	if !strings.Contains(msg, "RESIN_AUTH_VERSION=LEGACY_V0") {
-		t.Fatalf("warning message should mention LEGACY_V0, got: %q", msg)
+
+	if err := loadDotenvFile(path); err != nil {
+		t.Fatalf("loadDotenvFile: %v", err)
 	}
-	if !strings.Contains(msg, config.AuthMigrationGuideURL) {
-		t.Fatalf("warning message should mention migration guide, got: %q", msg)
+
+	proxyToken, ok := os.LookupEnv("RESIN_PROXY_TOKEN")
+	if !ok {
+		t.Fatal("expected RESIN_PROXY_TOKEN to be defined from .env")
+	}
+	if proxyToken != "" {
+		t.Fatalf("RESIN_PROXY_TOKEN = %q, want empty", proxyToken)
+	}
+
+	cfg, err := config.LoadEnvConfig()
+	if err != nil {
+		t.Fatalf("LoadEnvConfig: %v", err)
+	}
+	if cfg.ProxyToken != "" {
+		t.Fatalf("cfg.ProxyToken = %q, want empty", cfg.ProxyToken)
 	}
 }
 
-func TestAuthVersionStartupWarning_V1(t *testing.T) {
-	msg := authVersionStartupWarning(config.AuthVersionV1)
-	if msg != "" {
-		t.Fatalf("expected empty warning for V1, got: %q", msg)
+func TestLoadDotenvFile_DoesNotOverrideExistingEnv(t *testing.T) {
+	unsetEnvForDotenvTest(t, "RESIN_AUTH_VERSION", "RESIN_ADMIN_TOKEN", "RESIN_PROXY_TOKEN")
+	if err := os.Setenv("RESIN_PROXY_TOKEN", "real-env-token"); err != nil {
+		t.Fatalf("Setenv(RESIN_PROXY_TOKEN): %v", err)
+	}
+
+	path := filepath.Join(t.TempDir(), ".env")
+	content := strings.Join([]string{
+		"RESIN_AUTH_VERSION=V1",
+		"RESIN_ADMIN_TOKEN=admin-secret",
+		"RESIN_PROXY_TOKEN=dotenv-token",
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("WriteFile(.env): %v", err)
+	}
+
+	if err := loadDotenvFile(path); err != nil {
+		t.Fatalf("loadDotenvFile: %v", err)
+	}
+
+	if got := os.Getenv("RESIN_PROXY_TOKEN"); got != "real-env-token" {
+		t.Fatalf("RESIN_PROXY_TOKEN = %q, want real-env-token", got)
+	}
+	if got := os.Getenv("RESIN_AUTH_VERSION"); got != "V1" {
+		t.Fatalf("RESIN_AUTH_VERSION = %q, want V1", got)
+	}
+}
+
+func TestLoadDotenvFile_IgnoresMissingFile(t *testing.T) {
+	if err := loadDotenvFile(filepath.Join(t.TempDir(), ".env")); err != nil {
+		t.Fatalf("loadDotenvFile missing file: %v", err)
 	}
 }
 
@@ -125,6 +193,9 @@ func TestBootstrapTopology_CreatesDefaultPlatformWhenMissing(t *testing.T) {
 	}
 	if defaultPlat.AllocationPolicy != "PREFER_LOW_LATENCY" {
 		t.Fatalf("allocation_policy: got %q, want %q", defaultPlat.AllocationPolicy, "PREFER_LOW_LATENCY")
+	}
+	if defaultPlat.PassiveCircuitBreakerDisabled {
+		t.Fatal("passive_circuit_breaker_disabled: got true, want false")
 	}
 
 	if !reflect.DeepEqual(defaultPlat.RegexFilters, []string{`^Provider/.*`}) {
@@ -329,7 +400,7 @@ func TestBootstrapTopology_V1RejectsPersistedInvalidPlatformName(t *testing.T) {
 	now := time.Now().UnixNano()
 	if err := engine.UpsertPlatform(model.Platform{
 		ID:                     "plat-1",
-		Name:                   "LegacyPlatform",
+		Name:                   "StoredPlatform",
 		StickyTTLNs:            int64(time.Hour),
 		RegexFilters:           []string{},
 		RegionFilters:          []string{},
@@ -345,23 +416,17 @@ func TestBootstrapTopology_V1RejectsPersistedInvalidPlatformName(t *testing.T) {
 		t.Fatalf("OpenDB(state.db): %v", err)
 	}
 	defer db.Close()
-	if _, err := db.Exec(`UPDATE platforms SET name = ? WHERE id = ?`, "legacy:bad", "plat-1"); err != nil {
+	if _, err := db.Exec(`UPDATE platforms SET name = ? WHERE id = ?`, "invalid:bad", "plat-1"); err != nil {
 		t.Fatalf("corrupt platform name row: %v", err)
 	}
 
 	subManager, pool := newBootstrapTestRuntime(config.NewDefaultRuntimeConfig())
-	envCfg := newDefaultPlatformEnvConfig()
-	envCfg.AuthVersion = config.AuthVersionV1
-
-	err = bootstrapTopology(engine, subManager, pool, envCfg)
+	err = bootstrapTopology(engine, subManager, pool, newDefaultPlatformEnvConfig())
 	if err == nil {
 		t.Fatal("expected bootstrapTopology to fail when V1 detects invalid persisted platform name")
 	}
-	if !strings.Contains(err.Error(), "RESIN_AUTH_VERSION=V1") {
+	if !strings.Contains(err.Error(), "incompatible with V1") {
 		t.Fatalf("unexpected error: %v", err)
-	}
-	if !strings.Contains(err.Error(), config.AuthMigrationGuideURL) {
-		t.Fatalf("expected migration guide link in error, got: %v", err)
 	}
 }
 
@@ -379,7 +444,7 @@ func TestBootstrapTopology_V1RejectsPersistedPlatformNameWithLeadingSpace(t *tes
 	now := time.Now().UnixNano()
 	if err := engine.UpsertPlatform(model.Platform{
 		ID:                     "plat-1",
-		Name:                   "LegacyPlatform",
+		Name:                   "StoredPlatform",
 		StickyTTLNs:            int64(time.Hour),
 		RegexFilters:           []string{},
 		RegionFilters:          []string{},
@@ -400,18 +465,12 @@ func TestBootstrapTopology_V1RejectsPersistedPlatformNameWithLeadingSpace(t *tes
 	}
 
 	subManager, pool := newBootstrapTestRuntime(config.NewDefaultRuntimeConfig())
-	envCfg := newDefaultPlatformEnvConfig()
-	envCfg.AuthVersion = config.AuthVersionV1
-
-	err = bootstrapTopology(engine, subManager, pool, envCfg)
+	err = bootstrapTopology(engine, subManager, pool, newDefaultPlatformEnvConfig())
 	if err == nil {
 		t.Fatal("expected bootstrapTopology to fail when V1 detects leading space in persisted platform name")
 	}
-	if !strings.Contains(err.Error(), "RESIN_AUTH_VERSION=V1") {
+	if !strings.Contains(err.Error(), "incompatible with V1") {
 		t.Fatalf("unexpected error: %v", err)
-	}
-	if !strings.Contains(err.Error(), config.AuthMigrationGuideURL) {
-		t.Fatalf("expected migration guide link in error, got: %v", err)
 	}
 }
 
@@ -429,7 +488,7 @@ func TestBootstrapTopology_V1RejectsPersistedReservedPlatformNameAPI(t *testing.
 	now := time.Now().UnixNano()
 	if err := engine.UpsertPlatform(model.Platform{
 		ID:                     "plat-1",
-		Name:                   "LegacyPlatform",
+		Name:                   "StoredPlatform",
 		StickyTTLNs:            int64(time.Hour),
 		RegexFilters:           []string{},
 		RegionFilters:          []string{},
@@ -450,18 +509,12 @@ func TestBootstrapTopology_V1RejectsPersistedReservedPlatformNameAPI(t *testing.
 	}
 
 	subManager, pool := newBootstrapTestRuntime(config.NewDefaultRuntimeConfig())
-	envCfg := newDefaultPlatformEnvConfig()
-	envCfg.AuthVersion = config.AuthVersionV1
-
-	err = bootstrapTopology(engine, subManager, pool, envCfg)
+	err = bootstrapTopology(engine, subManager, pool, newDefaultPlatformEnvConfig())
 	if err == nil {
 		t.Fatal("expected bootstrapTopology to fail when V1 detects reserved platform name api")
 	}
-	if !strings.Contains(err.Error(), "RESIN_AUTH_VERSION=V1") {
+	if !strings.Contains(err.Error(), "incompatible with V1") {
 		t.Fatalf("unexpected error: %v", err)
-	}
-	if !strings.Contains(err.Error(), config.AuthMigrationGuideURL) {
-		t.Fatalf("expected migration guide link in error, got: %v", err)
 	}
 }
 
@@ -480,7 +533,7 @@ func TestBootstrapTopology_V1RejectsAllPersistedInvalidPlatformNames(t *testing.
 	for _, p := range []model.Platform{
 		{
 			ID:                     "plat-1",
-			Name:                   "LegacyPlatformOne",
+			Name:                   "StoredPlatformOne",
 			StickyTTLNs:            int64(time.Hour),
 			RegexFilters:           []string{},
 			RegionFilters:          []string{},
@@ -490,7 +543,7 @@ func TestBootstrapTopology_V1RejectsAllPersistedInvalidPlatformNames(t *testing.
 		},
 		{
 			ID:                     "plat-2",
-			Name:                   "LegacyPlatformTwo",
+			Name:                   "StoredPlatformTwo",
 			StickyTTLNs:            int64(time.Hour),
 			RegexFilters:           []string{},
 			RegionFilters:          []string{},
@@ -509,7 +562,7 @@ func TestBootstrapTopology_V1RejectsAllPersistedInvalidPlatformNames(t *testing.
 		t.Fatalf("OpenDB(state.db): %v", err)
 	}
 	defer db.Close()
-	if _, err := db.Exec(`UPDATE platforms SET name = ? WHERE id = ?`, "legacy:bad-one", "plat-1"); err != nil {
+	if _, err := db.Exec(`UPDATE platforms SET name = ? WHERE id = ?`, "invalid:bad-one", "plat-1"); err != nil {
 		t.Fatalf("corrupt platform name row (plat-1): %v", err)
 	}
 	if _, err := db.Exec(`UPDATE platforms SET name = ? WHERE id = ?`, "api", "plat-2"); err != nil {
@@ -517,27 +570,21 @@ func TestBootstrapTopology_V1RejectsAllPersistedInvalidPlatformNames(t *testing.
 	}
 
 	subManager, pool := newBootstrapTestRuntime(config.NewDefaultRuntimeConfig())
-	envCfg := newDefaultPlatformEnvConfig()
-	envCfg.AuthVersion = config.AuthVersionV1
-
-	err = bootstrapTopology(engine, subManager, pool, envCfg)
+	err = bootstrapTopology(engine, subManager, pool, newDefaultPlatformEnvConfig())
 	if err == nil {
 		t.Fatal("expected bootstrapTopology to fail when V1 detects multiple invalid persisted platform names")
 	}
-	if !strings.Contains(err.Error(), "2 platform(s) are incompatible with RESIN_AUTH_VERSION=V1") {
+	if !strings.Contains(err.Error(), "2 platform(s) are incompatible with V1") {
 		t.Fatalf("unexpected error summary: %v", err)
 	}
-	if !strings.Contains(err.Error(), "\"legacy:bad-one\"") || !strings.Contains(err.Error(), "\"api\"") {
+	if !strings.Contains(err.Error(), "\"invalid:bad-one\"") || !strings.Contains(err.Error(), "\"api\"") {
 		t.Fatalf("expected all invalid platform names in error, got: %v", err)
 	}
 	if !strings.Contains(err.Error(), "Platform name rules:") {
 		t.Fatalf("expected platform-name rules in error, got: %v", err)
 	}
-	if strings.Contains(err.Error(), "\"legacy:bad-one\":") || strings.Contains(err.Error(), "\"api\":") {
+	if strings.Contains(err.Error(), "\"invalid:bad-one\":") || strings.Contains(err.Error(), "\"api\":") {
 		t.Fatalf("error should list invalid platform names without per-platform reason details, got: %v", err)
-	}
-	if !strings.Contains(err.Error(), config.AuthMigrationGuideURL) {
-		t.Fatalf("expected migration guide link in error, got: %v", err)
 	}
 }
 

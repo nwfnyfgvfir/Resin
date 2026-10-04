@@ -22,7 +22,7 @@ import { getRequestLog, getRequestLogPayloads, listRequestLogs } from "./api";
 import type { RequestLogItem, RequestLogListFilters } from "./types";
 
 type BoolFilter = "all" | "true" | "false";
-type ProxyTypeFilter = "all" | "1" | "2";
+type ProxyTypeFilter = "all" | "1" | "2" | "3";
 
 type FilterDraft = {
   from_local: string;
@@ -37,6 +37,8 @@ type FilterDraft = {
   limit: number;
 };
 
+type DebouncedTextFilters = Pick<FilterDraft, "platform_name" | "account" | "target_host" | "egress_ip" | "http_status">;
+
 const defaultFilters: FilterDraft = {
   from_local: "",
   to_local: "",
@@ -49,7 +51,11 @@ const defaultFilters: FilterDraft = {
   http_status: "",
   limit: 100,
 };
+const FILTER_DEBOUNCE_MS = 100;
 const PAGE_SIZE_OPTIONS = [20, 50, 100, 200, 500, 1000, 2000] as const;
+const REQUEST_LOGS_FORWARD_BADGE_CLASS = "request-logs-proxy-badge-forward";
+const REQUEST_LOGS_REVERSE_BADGE_CLASS = "request-logs-proxy-badge-reverse";
+const REQUEST_LOGS_SOCKS_BADGE_CLASS = "request-logs-proxy-badge-socks";
 
 const PAYLOAD_TABS = ["request", "response"] as const;
 type PayloadTab = (typeof PAYLOAD_TABS)[number];
@@ -78,6 +84,17 @@ function boolFromFilter(value: BoolFilter): boolean | undefined {
     return false;
   }
   return undefined;
+}
+
+function formatDurationMs(value: number): string {
+  return `${value} ms`;
+}
+
+function formatOptionalDurationMs(value: number | undefined): string {
+  if (value === undefined || value === null || value <= 0) {
+    return "-";
+  }
+  return formatDurationMs(value);
 }
 
 function decodeBase64ToBytes(raw: string): Uint8Array | null {
@@ -274,14 +291,40 @@ function buildActiveFilters(draft: FilterDraft): Omit<RequestLogListFilters, "cu
   };
 }
 
+function pickDebouncedTextFilters(filters: FilterDraft): DebouncedTextFilters {
+  return {
+    platform_name: filters.platform_name,
+    account: filters.account,
+    target_host: filters.target_host,
+    egress_ip: filters.egress_ip,
+    http_status: filters.http_status,
+  };
+}
+
 function proxyTypeLabel(proxyType: number): string {
   if (proxyType === 1) {
-    return "正向代理";
+    return "HTTP 正向代理";
   }
   if (proxyType === 2) {
-    return "反向代理";
+    return "HTTP 反向代理";
+  }
+  if (proxyType === 3) {
+    return "SOCKS5 正向代理";
   }
   return String(proxyType);
+}
+
+function proxyTypeBadgeClassName(proxyType: number): string | null {
+  if (proxyType === 1) {
+    return REQUEST_LOGS_FORWARD_BADGE_CLASS;
+  }
+  if (proxyType === 2) {
+    return REQUEST_LOGS_REVERSE_BADGE_CLASS;
+  }
+  if (proxyType === 3) {
+    return REQUEST_LOGS_SOCKS_BADGE_CLASS;
+  }
+  return null;
 }
 
 function dateLocale(): string {
@@ -318,6 +361,9 @@ function splitDateTime(input: string): { date: string; time: string } {
 export function RequestLogsPage() {
   const { t } = useI18n();
   const [filters, setFilters] = useState<FilterDraft>(defaultFilters);
+  const [debouncedTextFilters, setDebouncedTextFilters] = useState<DebouncedTextFilters>(() =>
+    pickDebouncedTextFilters(defaultFilters),
+  );
   const [cursorStack, setCursorStack] = useState<string[]>([""]);
   const [pageIndex, setPageIndex] = useState(0);
   const [selectedLogId, setSelectedLogId] = useState("");
@@ -336,7 +382,38 @@ export function RequestLogsPage() {
     staleTime: 60_000,
   });
 
-  const activeFilters = useMemo(() => buildActiveFilters(filters), [filters]);
+  useEffect(() => {
+    const timeoutID = window.setTimeout(() => {
+      setDebouncedTextFilters({
+        platform_name: filters.platform_name,
+        account: filters.account,
+        target_host: filters.target_host,
+        egress_ip: filters.egress_ip,
+        http_status: filters.http_status,
+      });
+    }, FILTER_DEBOUNCE_MS);
+    return () => window.clearTimeout(timeoutID);
+  }, [filters.account, filters.egress_ip, filters.http_status, filters.platform_name, filters.target_host]);
+
+  const queryFilters = useMemo<FilterDraft>(
+    () => ({
+      from_local: filters.from_local,
+      to_local: filters.to_local,
+      proxy_type: filters.proxy_type,
+      net_ok: filters.net_ok,
+      limit: filters.limit,
+      ...debouncedTextFilters,
+    }),
+    [
+      debouncedTextFilters,
+      filters.from_local,
+      filters.limit,
+      filters.net_ok,
+      filters.proxy_type,
+      filters.to_local,
+    ],
+  );
+  const activeFilters = useMemo(() => buildActiveFilters(queryFilters), [queryFilters]);
   const cursor = cursorStack[pageIndex] || "";
 
   const rangeInvalid = useMemo(() => {
@@ -417,6 +494,7 @@ export function RequestLogsPage() {
 
   const resetFilters = () => {
     setFilters(defaultFilters);
+    setDebouncedTextFilters(pickDebouncedTextFilters(defaultFilters));
     setCursorStack([""]);
     setPageIndex(0);
     setSelectedLogId("");
@@ -509,6 +587,23 @@ export function RequestLogsPage() {
   }, [payloadQuery.data, payloadTab, t]);
 
   const hasMore = Boolean(logsQuery.data?.has_more && logsQuery.data?.next_cursor);
+  const renderProxyTypeBadge = (proxyType: number, context: "table" | "drawer" = "table") => {
+    const className = proxyTypeBadgeClassName(proxyType);
+    if (!className) {
+      return t(proxyTypeLabel(proxyType));
+    }
+
+    let label = "";
+    if (proxyType === 1) {
+      label = context === "drawer" ? t("HTTP") : t("正向");
+    } else if (proxyType === 2) {
+      label = t("反向");
+    } else {
+      label = t("SOCKS5");
+    }
+
+    return <Badge className={className}>{label}</Badge>;
+  };
 
   const col = useMemo(() => createColumnHelper<RequestLogItem>(), []);
 
@@ -528,12 +623,7 @@ export function RequestLogsPage() {
       }),
       col.accessor("proxy_type", {
         header: t("代理"),
-        cell: (info) => {
-          const val = info.getValue();
-          if (val === 1) return <Badge variant="info">{t("正向")}</Badge>;
-          if (val === 2) return <Badge variant="accent">{t("反向")}</Badge>;
-          return <Badge variant="neutral">{val}</Badge>;
-        },
+        cell: (info) => renderProxyTypeBadge(info.getValue()),
       }),
       col.display({
         id: "platform_account",
@@ -563,7 +653,7 @@ export function RequestLogsPage() {
       }),
       col.display({
         id: "http",
-        header: "HTTP",
+        header: t("HTTP"),
         cell: (info) => {
           const log = info.row.original;
           return (
@@ -583,9 +673,13 @@ export function RequestLogsPage() {
           </Badge>
         ),
       }),
+      col.accessor("first_byte_duration_ms", {
+        header: t("首字耗时"),
+        cell: (info) => formatOptionalDurationMs(info.getValue()),
+      }),
       col.accessor("duration_ms", {
-        header: t("耗时"),
-        cell: (info) => `${info.getValue()} ms`,
+        header: t("总耗时"),
+        cell: (info) => formatDurationMs(info.getValue()),
       }),
       col.display({
         id: "traffic",
@@ -732,8 +826,9 @@ export function RequestLogsPage() {
                   style={{ width: "100%", padding: "4px 8px", fontSize: "0.875rem", minHeight: "32px", height: "32px" }}
                 >
                   <option value="all">{t("全部")}</option>
-                  <option value="1">{t("正向代理")}</option>
-                  <option value="2">{t("反向代理")}</option>
+                  <option value="1">{t("HTTP 正向代理")}</option>
+                  <option value="2">{t("HTTP 反向代理")}</option>
+                  <option value="3">{t("SOCKS5 正向代理")}</option>
                 </Select>
               </div>
 
@@ -831,6 +926,7 @@ export function RequestLogsPage() {
             onRowClick={(log) => openDrawer(log.id)}
             selectedRowId={drawerVisible ? detailLogId : undefined}
             getRowId={(log) => log.id}
+            className="data-table-logs"
             wrapClassName="data-table-wrap-logs"
           />
         ) : null}
@@ -889,26 +985,22 @@ export function RequestLogsPage() {
                   </div>
                   <div>
                     <span>{t("代理类型")}</span>
-                    <p>
-                      {detailLog.proxy_type === 1 ? (
-                        <Badge variant="info">{t("正向")}</Badge>
-                      ) : detailLog.proxy_type === 2 ? (
-                        <Badge variant="accent">{t("反向")}</Badge>
-                      ) : (
-                        t(proxyTypeLabel(detailLog.proxy_type))
-                      )}
-                    </p>
+                    <p>{renderProxyTypeBadge(detailLog.proxy_type, "drawer")}</p>
                   </div>
                   <div>
-                    <span>HTTP</span>
+                    <span>{t("HTTP")}</span>
                     <p>
                       {detailLog.http_method || "-"} {detailLog.http_status || "-"}
                     </p>
                   </div>
 
                   <div>
-                    <span>{t("耗时")}</span>
-                    <p>{detailLog.duration_ms} ms</p>
+                    <span>{t("首字耗时")}</span>
+                    <p>{formatOptionalDurationMs(detailLog.first_byte_duration_ms)}</p>
+                  </div>
+                  <div>
+                    <span>{t("总耗时")}</span>
+                    <p>{formatDurationMs(detailLog.duration_ms)}</p>
                   </div>
                   <div>
                     <span>{t("平台")}</span>

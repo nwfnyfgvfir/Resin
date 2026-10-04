@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -85,9 +84,11 @@ type EnvConfig struct {
 	DefaultPlatformAllocationPolicy                 string
 	ProbeTimeout                                    time.Duration
 	ResourceFetchTimeout                            time.Duration
+	NodeDNSUpstreams                                []string
 	ProxyTransportMaxIdleConns                      int
 	ProxyTransportMaxIdleConnsPerHost               int
 	ProxyTransportIdleConnTimeout                   time.Duration
+	ProxyBypassRules                                []string
 
 	// Request log
 	RequestLogQueueSize           int
@@ -111,6 +112,16 @@ type EnvConfig struct {
 	MetricLeasesRetentionSeconds      int
 	MetricLatencyBinWidthMS           int
 	MetricLatencyBinOverflowMS        int
+}
+
+// DefaultNodeDNSUpstreams returns the default node DNS upstream URI list.
+func DefaultNodeDNSUpstreams() []string {
+	return []string{
+		"https://doh.pub/dns-query",
+		"https://dns.alidns.com/dns-query",
+		"tls://223.5.5.5?sni=dns.alidns.com",
+		"local",
+	}
 }
 
 // LoadEnvConfig reads environment variables and returns a validated EnvConfig.
@@ -163,22 +174,27 @@ func LoadEnvConfig() (*EnvConfig, error) {
 	)
 	cfg.ProbeTimeout = envDuration("RESIN_PROBE_TIMEOUT", 15*time.Second, &errs)
 	cfg.ResourceFetchTimeout = envDuration("RESIN_RESOURCE_FETCH_TIMEOUT", 30*time.Second, &errs)
+	cfg.NodeDNSUpstreams = envStringSlice("RESIN_NODE_DNS_UPSTREAMS", DefaultNodeDNSUpstreams(), &errs)
 	cfg.ProxyTransportMaxIdleConns = envInt("RESIN_PROXY_TRANSPORT_MAX_IDLE_CONNS", 1024, &errs)
 	cfg.ProxyTransportMaxIdleConnsPerHost = envInt("RESIN_PROXY_TRANSPORT_MAX_IDLE_CONNS_PER_HOST", 64, &errs)
 	cfg.ProxyTransportIdleConnTimeout = envDuration("RESIN_PROXY_TRANSPORT_IDLE_CONN_TIMEOUT", 90*time.Second, &errs)
+	cfg.ProxyBypassRules = envDelimitedStringSlice("RESIN_PROXY_BYPASS", []string{})
 
 	// --- Request log ---
 	cfg.RequestLogQueueSize = envInt("RESIN_REQUEST_LOG_QUEUE_SIZE", 8192, &errs)
 	cfg.RequestLogQueueFlushBatchSize = envInt("RESIN_REQUEST_LOG_QUEUE_FLUSH_BATCH_SIZE", 4096, &errs)
 	cfg.RequestLogQueueFlushInterval = envDuration("RESIN_REQUEST_LOG_QUEUE_FLUSH_INTERVAL", 5*time.Minute, &errs)
 	cfg.RequestLogDBMaxMB = envInt("RESIN_REQUEST_LOG_DB_MAX_MB", 512, &errs)
-	cfg.RequestLogDBRetainCount = envInt("RESIN_REQUEST_LOG_DB_RETAIN_COUNT", 5, &errs)
+	cfg.RequestLogDBRetainCount = envInt("RESIN_REQUEST_LOG_DB_RETAIN_COUNT", 2, &errs)
 
-	// --- Auth (must be defined; empty means auth disabled) ---
-	authVersionRaw, hasAuthVersion := os.LookupEnv("RESIN_AUTH_VERSION")
+	// --- Auth (tokens must be defined; empty means auth disabled) ---
+	authVersionRaw := os.Getenv("RESIN_AUTH_VERSION")
 	adminToken, hasAdminToken := os.LookupEnv("RESIN_ADMIN_TOKEN")
 	proxyToken, hasProxyToken := os.LookupEnv("RESIN_PROXY_TOKEN")
-	cfg.AuthVersion = NormalizeAuthVersion(authVersionRaw)
+	cfg.AuthVersion = AuthVersionV1
+	if strings.TrimSpace(authVersionRaw) != "" {
+		cfg.AuthVersion = NormalizeAuthVersion(authVersionRaw)
+	}
 	cfg.AdminToken = adminToken
 	cfg.ProxyToken = proxyToken
 
@@ -194,58 +210,26 @@ func LoadEnvConfig() (*EnvConfig, error) {
 	cfg.MetricLatencyBinOverflowMS = envInt("RESIN_METRIC_LATENCY_BIN_OVERFLOW_MS", 3000, &errs)
 
 	// --- Validation ---
-	if !hasAuthVersion {
+	if cfg.AuthVersion == "" {
 		errs = append(
 			errs,
 			fmt.Sprintf(
-				"RESIN_AUTH_VERSION must be defined (allowed: %s, %s). If you are upgrading from an older version, set RESIN_AUTH_VERSION=%s first for compatibility, then migrate and switch to %s. Migration guide: %s",
-				AuthVersionLegacyV0,
-				AuthVersionV1,
-				AuthVersionLegacyV0,
-				AuthVersionV1,
-				AuthMigrationGuideURL,
-			),
-		)
-	} else if cfg.AuthVersion == "" {
-		errs = append(
-			errs,
-			fmt.Sprintf(
-				"RESIN_AUTH_VERSION: invalid value %q (allowed: %s, %s)",
+				"RESIN_AUTH_VERSION: invalid value %q (allowed: %s)",
 				authVersionRaw,
-				AuthVersionLegacyV0,
 				AuthVersionV1,
 			),
 		)
 	}
 
 	if !hasAdminToken {
-		errs = append(errs, "RESIN_ADMIN_TOKEN must be defined (can be empty)")
+		errs = append(errs, "RESIN_ADMIN_TOKEN must be defined. If you intend to use an empty token, please set it explicitly (e.g., RESIN_ADMIN_TOKEN=).")
 	}
 	if !hasProxyToken {
-		errs = append(errs, "RESIN_PROXY_TOKEN must be defined (can be empty)")
+		errs = append(errs, "RESIN_PROXY_TOKEN must be defined. If you intend to use an empty token, please set it explicitly (e.g., RESIN_PROXY_TOKEN=).")
 	} else {
 		if cfg.ProxyToken != "" {
-			switch cfg.AuthVersion {
-			case AuthVersionV1:
-				if err := ValidateProxyTokenForV1(cfg.ProxyToken); err != nil {
-					errs = append(
-						errs,
-						fmt.Sprintf(
-							"RESIN_PROXY_TOKEN: %v. For migration, update RESIN_PROXY_TOKEN to a V1-compatible value. Migration guide: %s",
-							err,
-							AuthMigrationGuideURL,
-						),
-					)
-				}
-			case AuthVersionLegacyV0:
-				if strings.Contains(cfg.ProxyToken, ":") || strings.Contains(cfg.ProxyToken, "@") {
-					errs = append(errs, "RESIN_PROXY_TOKEN must not contain ':' or '@' when RESIN_AUTH_VERSION=LEGACY_V0")
-				}
-			default:
-				// Keep validation deterministic even when auth version itself is invalid.
-				if strings.Contains(cfg.ProxyToken, ":") || strings.Contains(cfg.ProxyToken, "@") {
-					errs = append(errs, "RESIN_PROXY_TOKEN must not contain ':' or '@'")
-				}
+			if err := ValidateProxyTokenForV1(cfg.ProxyToken); err != nil {
+				errs = append(errs, fmt.Sprintf("RESIN_PROXY_TOKEN: %v", err))
 			}
 		}
 		if cfg.ProxyToken == "api" || cfg.ProxyToken == "healthz" || cfg.ProxyToken == "ui" {
@@ -294,10 +278,8 @@ func LoadEnvConfig() (*EnvConfig, error) {
 	if cfg.DefaultPlatformStickyTTL <= 0 {
 		errs = append(errs, "RESIN_DEFAULT_PLATFORM_STICKY_TTL must be positive")
 	}
-	for _, pattern := range cfg.DefaultPlatformRegexFilters {
-		if _, err := regexp.Compile(pattern); err != nil {
-			errs = append(errs, fmt.Sprintf("RESIN_DEFAULT_PLATFORM_REGEX_FILTERS: invalid regex %q: %v", pattern, err))
-		}
+	if _, err := platform.CompileRegexFilters(cfg.DefaultPlatformRegexFilters); err != nil {
+		errs = append(errs, fmt.Sprintf("RESIN_DEFAULT_PLATFORM_REGEX_FILTERS: %v", err))
 	}
 	if err := platform.ValidateRegionFilters(cfg.DefaultPlatformRegionFilters); err != nil {
 		errs = append(errs, fmt.Sprintf("RESIN_DEFAULT_PLATFORM_REGION_FILTERS: %v", err))
@@ -356,6 +338,14 @@ func LoadEnvConfig() (*EnvConfig, error) {
 	}
 	if cfg.ResourceFetchTimeout <= 0 {
 		errs = append(errs, "RESIN_RESOURCE_FETCH_TIMEOUT must be positive")
+	}
+	if len(cfg.NodeDNSUpstreams) == 0 {
+		errs = append(errs, "RESIN_NODE_DNS_UPSTREAMS must contain at least one DNS upstream when defined")
+	}
+	for i, upstream := range cfg.NodeDNSUpstreams {
+		if strings.TrimSpace(upstream) == "" {
+			errs = append(errs, fmt.Sprintf("RESIN_NODE_DNS_UPSTREAMS[%d] must not be empty", i))
+		}
 	}
 	validatePositive("RESIN_PROXY_TRANSPORT_MAX_IDLE_CONNS", cfg.ProxyTransportMaxIdleConns, &errs)
 	validatePositive("RESIN_PROXY_TRANSPORT_MAX_IDLE_CONNS_PER_HOST", cfg.ProxyTransportMaxIdleConnsPerHost, &errs)
@@ -442,6 +432,31 @@ func envStringSlice(key string, defaultVal []string, errs *[]string) []string {
 	if err := json.Unmarshal([]byte(v), &out); err != nil {
 		*errs = append(*errs, fmt.Sprintf("%s: invalid JSON string array %q", key, v))
 		return defaultVal
+	}
+	if out == nil {
+		return []string{}
+	}
+	return out
+}
+
+func envDelimitedStringSlice(key string, defaultVal []string) []string {
+	v := os.Getenv(key)
+	if v == "" {
+		return defaultVal
+	}
+	return splitDelimitedStringSlice(v)
+}
+
+func splitDelimitedStringSlice(raw string) []string {
+	fields := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ';' || r == ',' || r == '\n' || r == '\r'
+	})
+	out := make([]string, 0, len(fields))
+	for _, field := range fields {
+		field = strings.TrimSpace(field)
+		if field != "" {
+			out = append(out, field)
+		}
 	}
 	if out == nil {
 		return []string{}

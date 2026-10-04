@@ -137,7 +137,7 @@ func TestForwardProxy_E2EHTTPSuccess(t *testing.T) {
 	})
 
 	req := httptest.NewRequest(http.MethodGet, upstream.URL+"/v1/ping?q=1", nil)
-	req.Header.Set("Proxy-Authorization", basicAuth("tok", "plat"))
+	req.Header.Set("Proxy-Authorization", basicAuth("plat", "tok"))
 	req.Header.Set("X-Test", "1")
 	w := httptest.NewRecorder()
 
@@ -167,6 +167,48 @@ func TestForwardProxy_E2EHTTPSuccess(t *testing.T) {
 	}
 }
 
+func TestForwardProxy_E2EHTTPBypassDialsDirect(t *testing.T) {
+	emitter := newMockEventEmitter()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Proxy-Authorization"); got != "" {
+			t.Fatalf("Proxy-Authorization leaked to direct upstream: %q", got)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("direct-forward"))
+	}))
+	defer upstream.Close()
+
+	fp := NewForwardProxy(ForwardProxyConfig{
+		ProxyToken:       "tok",
+		Events:           emitter,
+		ProxyBypassRules: []string{"127.*"},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, upstream.URL+"/direct", nil)
+	req.Header.Set("Proxy-Authorization", basicAuth("plat", "tok"))
+	w := httptest.NewRecorder()
+
+	fp.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want %d (body=%q, resinErr=%q)",
+			w.Code, http.StatusOK, w.Body.String(), w.Header().Get("X-Resin-Error"))
+	}
+	if got := w.Body.String(); got != "direct-forward" {
+		t.Fatalf("body: got %q, want %q", got, "direct-forward")
+	}
+
+	select {
+	case logEv := <-emitter.logCh:
+		if logEv.NodeHash != "" {
+			t.Fatalf("direct bypass should not record a routed node, got %q", logEv.NodeHash)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("expected direct forward log event")
+	}
+}
+
 func TestForwardProxy_E2EHTTPDialTimeout_ZeroEgress(t *testing.T) {
 	env := newProxyE2EEnv(t)
 	emitter := newMockEventEmitter()
@@ -186,7 +228,7 @@ func TestForwardProxy_E2EHTTPDialTimeout_ZeroEgress(t *testing.T) {
 
 	body := strings.Repeat("a", 256*1024)
 	req := httptest.NewRequest(http.MethodPost, "http://example.com/v1/upload", strings.NewReader(body))
-	req.Header.Set("Proxy-Authorization", basicAuth("tok", "plat"))
+	req.Header.Set("Proxy-Authorization", basicAuth("plat", "tok"))
 	req.Header.Set("Content-Type", "application/octet-stream")
 	w := httptest.NewRecorder()
 
@@ -230,7 +272,7 @@ func TestForwardProxy_E2EHTTPClientCanceledBeforeResponse(t *testing.T) {
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "http://example.com/v1/cancel", nil)
-	req.Header.Set("Proxy-Authorization", basicAuth("tok", "plat"))
+	req.Header.Set("Proxy-Authorization", basicAuth("plat", "tok"))
 	ctx, cancel := context.WithCancel(req.Context())
 	cancel()
 	req = req.WithContext(ctx)
@@ -299,6 +341,50 @@ func TestReverseProxy_E2ESuccess(t *testing.T) {
 	}
 	if got := w.Body.String(); got != "reverse-e2e" {
 		t.Fatalf("body: got %q, want %q", got, "reverse-e2e")
+	}
+}
+
+func TestReverseProxy_E2EHTTPBypassDialsDirect(t *testing.T) {
+	emitter := newMockEventEmitter()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Path; got != "/api/direct" {
+			t.Fatalf("unexpected path: %q", got)
+		}
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte("direct-reverse"))
+	}))
+	defer upstream.Close()
+
+	host := strings.TrimPrefix(upstream.URL, "http://")
+	path := fmt.Sprintf("/tok/plat:acct/http/%s/api/direct", host)
+
+	rp := NewReverseProxy(ReverseProxyConfig{
+		ProxyToken:       "tok",
+		Events:           emitter,
+		ProxyBypassRules: []string{"127.*"},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	w := httptest.NewRecorder()
+
+	rp.ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status: got %d, want %d (body=%q, resinErr=%q)",
+			w.Code, http.StatusAccepted, w.Body.String(), w.Header().Get("X-Resin-Error"))
+	}
+	if got := w.Body.String(); got != "direct-reverse" {
+		t.Fatalf("body: got %q, want %q", got, "direct-reverse")
+	}
+
+	select {
+	case logEv := <-emitter.logCh:
+		if logEv.NodeHash != "" {
+			t.Fatalf("direct bypass should not record a routed node, got %q", logEv.NodeHash)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("expected direct reverse log event")
 	}
 }
 
@@ -656,7 +742,7 @@ func TestForwardProxy_CONNECTTunnelSemantics(t *testing.T) {
 		"CONNECT %s HTTP/1.1\r\nHost: %s\r\nProxy-Authorization: %s\r\n\r\n",
 		targetAddr,
 		targetAddr,
-		basicAuth("tok", "plat"),
+		basicAuth("plat", "tok"),
 	)
 	if _, err := clientConn.Write([]byte(req)); err != nil {
 		t.Fatalf("write connect request: %v", err)
@@ -726,6 +812,100 @@ func TestForwardProxy_CONNECTTunnelSemantics(t *testing.T) {
 	t.Fatal("expected RecordResult call for CONNECT success")
 }
 
+func TestForwardProxy_CONNECTPreservesBufferedClientBytesAfterHijack(t *testing.T) {
+	env := newProxyE2EEnv(t)
+	emitter := newMockEventEmitter()
+	health := &mockHealthRecorder{}
+
+	targetLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen target: %v", err)
+	}
+	defer targetLn.Close()
+
+	targetDone := make(chan struct{})
+	go func() {
+		defer close(targetDone)
+		conn, err := targetLn.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = io.Copy(conn, conn)
+	}()
+
+	fp := NewForwardProxy(ForwardProxyConfig{
+		ProxyToken: "tok",
+		Router:     env.router,
+		Pool:       env.pool,
+		Health:     health,
+		Events:     emitter,
+	})
+	proxySrv := httptest.NewServer(fp)
+	defer proxySrv.Close()
+
+	proxyAddr := strings.TrimPrefix(proxySrv.URL, "http://")
+	clientConn, err := net.Dial("tcp", proxyAddr)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer clientConn.Close()
+
+	targetAddr := targetLn.Addr().String()
+	const payload = "prefetched-before-connect-response"
+	req := fmt.Sprintf(
+		"CONNECT %s HTTP/1.1\r\nHost: %s\r\nProxy-Authorization: %s\r\n\r\n%s",
+		targetAddr,
+		targetAddr,
+		basicAuth("plat", "tok"),
+		payload,
+	)
+	if _, err := clientConn.Write([]byte(req)); err != nil {
+		t.Fatalf("write coalesced connect request: %v", err)
+	}
+
+	reader := bufio.NewReader(clientConn)
+	statusLine, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read status line: %v", err)
+	}
+	if !strings.Contains(statusLine, "200 Connection Established") {
+		t.Fatalf("unexpected CONNECT status line: %q", statusLine)
+	}
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read response headers: %v", err)
+		}
+		if line == "\r\n" {
+			break
+		}
+	}
+
+	echo := make([]byte, len(payload))
+	if _, err := io.ReadFull(reader, echo); err != nil {
+		t.Fatalf("read tunneled echo: %v", err)
+	}
+	if got := string(echo); got != payload {
+		t.Fatalf("echo payload: got %q, want %q", got, payload)
+	}
+
+	_ = clientConn.Close()
+	<-targetDone
+
+	select {
+	case logEv := <-emitter.logCh:
+		if !logEv.NetOK {
+			t.Fatal("coalesced CONNECT should log net_ok=true")
+		}
+		if logEv.EgressBytes != int64(len(payload)) {
+			t.Fatalf("EgressBytes: got %d, want %d", logEv.EgressBytes, len(payload))
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("expected CONNECT log event")
+	}
+}
+
 func TestForwardProxy_CONNECTClientCanceledBeforeResponse(t *testing.T) {
 	env := newProxyE2EEnv(t)
 	emitter := newMockEventEmitter()
@@ -741,7 +921,7 @@ func TestForwardProxy_CONNECTClientCanceledBeforeResponse(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodConnect, "http://example.com:443", nil)
 	req.Host = "example.com:443"
-	req.Header.Set("Proxy-Authorization", basicAuth("tok", "plat"))
+	req.Header.Set("Proxy-Authorization", basicAuth("plat", "tok"))
 	ctx, cancel := context.WithCancel(req.Context())
 	cancel()
 	req = req.WithContext(ctx)
@@ -761,6 +941,63 @@ func TestForwardProxy_CONNECTClientCanceledBeforeResponse(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if health.resultCalls.Load() != 0 {
 		t.Fatalf("client-canceled CONNECT should not record health result, got %d calls", health.resultCalls.Load())
+	}
+}
+
+func TestForwardProxy_CONNECTResponseFlushFailureDoesNotPenalizeNode(t *testing.T) {
+	env := newProxyE2EEnv(t)
+	emitter := newMockEventEmitter()
+	health := &mockHealthRecorder{}
+
+	upstreamConn, upstreamPeer := net.Pipe()
+	defer upstreamPeer.Close()
+
+	setProxyE2EOutboundDialFunc(t, env, func(context.Context, string, M.Socksaddr) (net.Conn, error) {
+		return upstreamConn, nil
+	})
+
+	fp := NewForwardProxy(ForwardProxyConfig{
+		ProxyToken: "tok",
+		Router:     env.router,
+		Pool:       env.pool,
+		Health:     health,
+		Events:     emitter,
+	})
+
+	req := httptest.NewRequest(http.MethodConnect, "http://example.com:443", nil)
+	req.Host = "example.com:443"
+	req.Header.Set("Proxy-Authorization", basicAuth("plat", "tok"))
+
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+
+	failingConn := &failOnWriteConn{Conn: serverConn, failAt: 1}
+	w := &hijackTestResponseWriter{
+		conn: failingConn,
+		rw:   bufio.NewReadWriter(bufio.NewReader(failingConn), bufio.NewWriter(failingConn)),
+	}
+
+	fp.ServeHTTP(w, req)
+
+	select {
+	case logEv := <-emitter.logCh:
+		if logEv.NetOK {
+			t.Fatal("CONNECT response flush failure should log net_ok=false")
+		}
+		if logEv.ResinError != ErrUpstreamRequestFailed.ResinError {
+			t.Fatalf("ResinError: got %q, want %q", logEv.ResinError, ErrUpstreamRequestFailed.ResinError)
+		}
+		if logEv.UpstreamStage != "connect_client_response_flush" {
+			t.Fatalf("UpstreamStage: got %q, want %q", logEv.UpstreamStage, "connect_client_response_flush")
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("expected CONNECT log event")
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	if health.resultCalls.Load() != 0 {
+		t.Fatalf("CONNECT response flush failure should not record health result, got %d calls", health.resultCalls.Load())
 	}
 }
 
@@ -807,7 +1044,7 @@ func TestForwardProxy_CONNECTZeroTrafficMarkedFailed(t *testing.T) {
 		"CONNECT %s HTTP/1.1\r\nHost: %s\r\nProxy-Authorization: %s\r\n\r\n",
 		targetAddr,
 		targetAddr,
-		basicAuth("tok", "plat"),
+		basicAuth("plat", "tok"),
 	)
 	if _, err := clientConn.Write([]byte(req)); err != nil {
 		t.Fatalf("write connect request: %v", err)
@@ -911,7 +1148,7 @@ func TestForwardProxy_CONNECTHalfTrafficNotMarkedZeroTraffic(t *testing.T) {
 		"CONNECT %s HTTP/1.1\r\nHost: %s\r\nProxy-Authorization: %s\r\n\r\n",
 		targetAddr,
 		targetAddr,
-		basicAuth("tok", "plat"),
+		basicAuth("plat", "tok"),
 	)
 	if _, err := clientConn.Write([]byte(req)); err != nil {
 		t.Fatalf("write connect request: %v", err)

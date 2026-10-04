@@ -1,7 +1,7 @@
 <div align="center">
   <img src="webui/public/vite.svg" width="48" alt="Resin Logo" />
   <h1>Resin</h1>
-  <p><strong>将大量的代理订阅转化为一个稳定、智能、可观测且支持会话保持的网络代理池。</strong></p>
+  <p><strong>将大量的代理订阅转化为一个稳定、智能、可观测且支持会话保持的统一代理入口。</strong></p>
 </div>
 
 <p align="center">
@@ -19,6 +19,7 @@
 **Resin** 是一个专为接管海量节点设计的**高性能智能代理池网关**。
 
 它用于在上层屏蔽底层代理节点的不稳定性，将分散节点聚合为一个支持 **“会话保持（粘性路由）”** 的统一网关入口，同时支持 HTTP 与可选的 SOCKS5 入站。
+它用于在上层屏蔽底层代理节点的不稳定性，将分散节点聚合为一个支持 **“会话保持（粘性路由）”** 的统一代理入口。
 
 ## 💡 为什么选择 Resin？
 
@@ -26,6 +27,8 @@
 - **智能调度与熔断**：全自动的 **被动+主动** 健康探测、出口 IP 探测、延迟分析，精准剔除坏节点。采用 P2C 算法结合按域名的延迟加权评分，智能选择最优节点。
 - **业务友好的粘性代理**：让同一业务账号优先绑定同一出口 IP，节点异常时自动切换同 IP 节点，在多数场景下减少业务波动。
 - **多种接入模式**：同时支持标准正向代理（HTTP Proxy）、SOCKS5 入站与 URL 反向代理（Reverse Proxy）。
+- **多种接入方式**：同时支持 HTTP 正向代理、SOCKS5 正向代理与 URL 反向代理，适配不同客户端与集成形态。
+- **多接入点管理**：可在 WebUI 热添加监听端口，并分别控制每个端口是否开放管理页面、HTTP 正向代理、HTTP 反向代理和 SOCKS5。
 - **可观测性**：提供详细的性能指标与日志记录，快速掌控全局（可视化 Web 管理后台）。包括完整的结构化请求日志，支持按平台、账号、目标站点等维度查询与审计。
 - **简单与强大兼得**：开箱即用的默认配置与深度自定义功能。无论你是只需几分钟跑通简单场景的个人使用者，还是需要高并发与高可用性的企业级团队，Resin 都能游刃有余。
 - **跨订阅智能去重**：不同订阅中配置相同的节点自动合并，共享健康状态，避免重复探测。
@@ -81,7 +84,6 @@ services:
     container_name: resin
     restart: unless-stopped
     environment:
-      RESIN_AUTH_VERSION: "V1" # 必填：LEGACY_V0 或 V1
       RESIN_ADMIN_TOKEN: "admin123" # 修改为你的管理后台密码
       RESIN_PROXY_TOKEN: "my-token" # 修改为你的代理密码
       RESIN_LISTEN_ADDRESS: 0.0.0.0
@@ -141,6 +143,7 @@ RESIN_DATABASE_MAX_IDLE_CONNS=5
 - 尚未迁移：`metrics.db` 与滚动分片 `request_logs-*.db`
 
 管理面板会显示当前数据库类型，便于确认进程实际运行在 SQLite 还是 PostgreSQL 模式。
+自定义接入点端口还必须能从容器外访问。Docker 无法为已运行容器动态增加端口映射，因此请在 `ports` 中提前映射所需端口范围（例如 `"2300-2399:2300-2399"`），或在适合的环境中使用 host 网络。
 
 *(如果你不想使用 Docker，请跳转文末查看 [其他部署方式](#其他部署方式))*
 
@@ -157,14 +160,17 @@ RESIN_DATABASE_MAX_IDLE_CONNS=5
 > - **「节点池」** 页面支持单选或多选节点，并将选中的节点导出为可直接导入 v2ray、v2rayN、Clash Meta 等客户端的订阅链接文本。
 
 ### 第三步：开始你的代理请求
-客户端接入方式参考接下来的章节。
+客户端接入方式参考接下来的章节。常见场景下，你可以按客户端能力选择 HTTP 正向代理、SOCKS5 正向代理或反向代理。
 
 ## 🟢 基础使用（非粘性代理）
 
 ### 简单接入代理
 如果你只需要一个高性能、大容量、且会自动健康管理的通用代理池，Resin 开箱即用。
-启动 Resin 服务后，给你的应用程序接入 `http://127.0.0.1:2260` 代理即可。  
-如果你不想设置代理密码，请将环境变量显式设为空字符串：`RESIN_PROXY_TOKEN=""`（变量必须定义）。此时可直接接入 `http://127.0.0.1:2260`。下面是使用 curl 的一个例子：
+启动 Resin 服务后，你可以按客户端能力选择 HTTP 正向代理、SOCKS5 正向代理或反向代理接入。  
+如果你不想设置代理密码，请将环境变量显式设为空字符串：`RESIN_PROXY_TOKEN=""`（变量必须定义）。此时 HTTP 正向代理可直接接入 `http://127.0.0.1:2260`，SOCKS5 正向代理可直接接入 `socks5://127.0.0.1:2260`。
+通过二进制文件或源码运行时，Resin 也会在读取配置前自动加载当前工作目录下的 `.env` 文件；已经由系统或 shell 设置的环境变量优先级高于 `.env`。
+
+HTTP 正向代理例子：
 
 ```bash
 curl -x http://127.0.0.1:2260 \
@@ -189,6 +195,15 @@ curl --proxy socks5h://127.0.0.1:2260 \
 ```
 
 当 `RESIN_AUTH_VERSION=V1` 时，SOCKS5 用户名沿用与 HTTP 正向代理相同的 `Platform.Account` 规则。当 `RESIN_PROXY_TOKEN=""` 时，Resin 仍然接受无密码 SOCKS5 客户端；如果客户端主动提供用户名/密码认证，Resin 也会把用户名解析为可选身份信息。
+SOCKS5 正向代理例子：
+
+```bash
+curl --proxy socks5h://127.0.0.1:2260 \
+  -U "Default:my-token" \
+  https://api.ipify.org
+```
+
+当 `RESIN_PROXY_TOKEN=""` 时，SOCKS5 也允许无认证接入。
 
 如果你的客户端支持修改服务的 `BASE_URL`，你也可以尝试反向代理接入。URL 格式为：`/令牌/Platform(可选).Account(可选)/协议/目标地址`。例如，你可以通过下面的 curl 命令通过 Resin 访问 `https://api.ipify.org`。
 
@@ -207,10 +222,28 @@ us
 hk
 ```
 
-对于正向代理，你可以在 http 代理的用户信息中填入希望使用的 Platform。下面是一个 curl 的例子：
+节点标签规则匹配 `<订阅名>/<节点标签>`，每行是一条正则表达式：普通规则之间为 OR，`*` 开头表示必须命中，`!` 开头表示命中即排除。例如下面表示选择香港或日本的专线节点，同时排除带有“过期”或者“失效”标签的节点：
+
+```text
+香港
+日本
+*专线
+!过期
+!失效
+```
+
+规则前缀只识别每行的第一个字符，其余内容仍是 Go 正则表达式。需要匹配字面量行首 `!` 时可以写成 `\!`。
+
+对于正向代理（HTTP / SOCKS5），你可以在认证信息中填入希望使用的 Platform。下面分别给出一个 curl 例子：
 
 ```bash
 curl -x http://127.0.0.1:2260 \
+  -U "MyPlatform:my-token" \
+  https://api.ipify.org
+```
+
+```bash
+curl --proxy socks5h://127.0.0.1:2260 \
   -U "MyPlatform:my-token" \
   https://api.ipify.org
 ```
@@ -233,16 +266,21 @@ curl http://127.0.0.1:2260/my-token/MyPlatform/https/api.ipify.org
 
 ### 粘性代理接入格式
 
-#### 方式一：正向代理接入 (HTTP Proxy)
-当 `RESIN_AUTH_VERSION=V1` 时，认证身份格式为：`Platform.Account:RESIN_PROXY_TOKEN`。  
+#### 方式一：正向代理接入（HTTP Proxy / SOCKS5）
+HTTP 正向代理与 SOCKS5 正向代理共用同一套身份格式：`Platform.Account:RESIN_PROXY_TOKEN`。
 
-> 如需 V0 旧格式，可设置 `RESIN_AUTH_VERSION=LEGACY_V0`，继续使用 `RESIN_PROXY_TOKEN:Platform:Account`。  
-
-直接将身份信息写入 Proxy Auth（代理用户名）中：
+直接将身份信息写入代理认证中即可：
 
 ```bash
-# 指定一个业务账号 user_tom，Resin 会为其长期分配一个稳定的专属 IP
+# HTTP 正向代理：指定业务账号 user_tom，Resin 会为其长期分配一个稳定的专属 IP
 curl -x http://127.0.0.1:2260 \
+  -U "Default.user_tom:my-token" \
+  https://api.ipify.org
+```
+
+```bash
+# SOCKS5 正向代理：身份格式与 HTTP 正向代理保持一致
+curl --proxy socks5h://127.0.0.1:2260 \
   -U "Default.user_tom:my-token" \
   https://api.ipify.org
 ```
@@ -304,14 +342,14 @@ curl "http://127.0.0.1:2260/my-token/MyPlatform/https/api.example.com/v1/orders"
 
 | 接入方式 | 代码侵入程度 | 说明 |
 | :--- | :--- | :--- |
-| 接入正向代理 | 🟢 **零侵入** | 客户端填入代理地址 `http://127.0.0.1:2260` 及账号密码即可。 |
+| 接入正向代理 | 🟢 **零侵入** | 客户端填入 HTTP 或 SOCKS5 代理地址及认证信息即可。 |
 | 接入反向代理 | 🟢 **零/低侵入** | 修改服务 BaseURL 即可接入，适配极易。 |
 
 💡 **如果你需要粘性代理**
 
 | 接入方式 | 代码侵入程度 | 说明 |
 | :--- | :--- | :--- |
-| 接入正向代理 | 🟡 **中侵入** | 需稍微修改代码：为不同用户附带不同认证信息（V1 例如 `平台.账号:密码`）。 |
+| 接入正向代理 | 🟡 **中侵入** | 需稍微修改代码：为不同用户附带不同认证信息。HTTP 与 SOCKS5 都可使用 `平台.账号:密码`。 |
 | 接入反向代理 | 🟡 **中侵入** | 需稍微修改代码：加入 `X-Resin-Account` 请求头或动态拼接带有账号的反代 URL 路径。 |
 | 接入反向代理 + 请求头规则 | 🟢 **零/低侵入** | Resin 允许通过识别业务原始头（如 `Authorization`）自动提取 Account 并进行粘性路由绑定，接入方式与非粘性反代接近。 |
 
@@ -330,7 +368,6 @@ curl "http://127.0.0.1:2260/my-token/MyPlatform/https/api.example.com/v1/orders"
 
 ```bash
 RESIN_ADMIN_TOKEN=【管理面板密码】 \
-RESIN_AUTH_VERSION=V1 \
 RESIN_PROXY_TOKEN=【代理密码】 \
 RESIN_STATE_DIR=./data/state \
 RESIN_CACHE_DIR=./data/cache \
@@ -338,6 +375,18 @@ RESIN_LOG_DIR=./data/log \
 RESIN_LISTEN_ADDRESS=0.0.0.0 \
 RESIN_PORT=2260 \
 ./resin
+```
+
+也可以在工作目录创建 `.env` 文件，然后直接运行 `./resin`：
+
+```dotenv
+RESIN_ADMIN_TOKEN=【管理面板密码】
+RESIN_PROXY_TOKEN=【代理密码】
+RESIN_STATE_DIR=./data/state
+RESIN_CACHE_DIR=./data/cache
+RESIN_LOG_DIR=./data/log
+RESIN_LISTEN_ADDRESS=0.0.0.0
+RESIN_PORT=2260
 ```
 </details>
 
@@ -360,7 +409,6 @@ go build -tags "with_quic with_wireguard with_grpc with_utls" -o resin ./cmd/res
 
 # 4. 运行程序
 RESIN_ADMIN_TOKEN=【管理面板密码】 \
-RESIN_AUTH_VERSION=V1 \
 RESIN_PROXY_TOKEN=【代理密码】 \
 RESIN_STATE_DIR=./data/state \
 RESIN_CACHE_DIR=./data/cache \
@@ -375,10 +423,14 @@ RESIN_PORT=2260 \
 
 ## 🛠️ 常见错误 (FAQ)
 
+- **Q: 如何让内网或本机目标不走代理节点？**
+  - **A**: 配置 `RESIN_PROXY_BYPASS`，用分号、逗号或换行分隔规则。命中的请求会由 Resin 本机直连目标，而不是通过代理节点。例如：`RESIN_PROXY_BYPASS="localhost;127.*;10.*;172.16.0.0/12;192.168.*;<local>"`。规则支持精确主机、`*`/`?` 通配符、CIDR 网段，以及表示无点号本地域名的 `<local>`。
 - **Q: 启动失败提示 `RESIN_PROXY_TOKEN` 未定义？**
-  - **A**: 就算你不打算启用代理密码，也必须显式配置它为空：`RESIN_PROXY_TOKEN=""`。
-- **Q: 启动失败提示 `RESIN_AUTH_VERSION` 未定义？**
-  - **A**: 请设置为 `LEGACY_V0` 或 `V1`。新用户设置成 V1 即可。有旧数据的老用户可以参考[迁移指南](doc/v1.0.0-migration-guide.zh-CN.md)。
+  - **A**: 就算你不打算启用代理密码，也必须显式配置它为空：`RESIN_PROXY_TOKEN=""`。如果你的 shell 会丢弃空环境变量，请创建 `.env` 文件并写入 `RESIN_PROXY_TOKEN=`。
+- **Q: 为什么配置 `RESIN_AUTH_VERSION=LEGACY_V0` 会启动失败？**
+  - **A**: 当前版本已不再支持 `LEGACY_V0`，请删除 `RESIN_AUTH_VERSION` 或将其设为 `V1`。如果你正从使用旧认证格式的版本升级，请参阅 [v1.0.0 认证迁移指南](doc/v1.0.0-migration-guide.zh-CN.md)。
+- **Q: 为什么 SOCKS5 客户端连不上？**
+  - **A**: 若 `RESIN_PROXY_TOKEN` 非空，客户端需要发送 SOCKS5 用户名密码认证；若它被显式设为空字符串，则也允许 `NO AUTH`。
 - **Q: 使用反向代理 WebSocket 协议（如 ws/wss）怎么写路径？**
   - **A**: 目标无论是不是 ws/wss，URL 路径里的协议字段**依然只能写 `http` 或 `https`**（不能写 ws/wss）。Resin 会自动探测并完成 WebSocket 协议升级（Upgrade）。
 

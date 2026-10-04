@@ -1,21 +1,33 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, ArrowLeft, Info, RefreshCw } from "lucide-react";
+import type { ColumnDef } from "@tanstack/react-table";
+import { AlertTriangle, ArrowLeft, Info, RefreshCw, Search, Sparkles, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
-import { useNavigate, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { Badge } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
+import { DataTable } from "../../components/ui/DataTable";
 import { Input } from "../../components/ui/Input";
+import { OffsetPagination } from "../../components/ui/OffsetPagination";
 import { Select } from "../../components/ui/Select";
+import { Switch } from "../../components/ui/Switch";
 import { Textarea } from "../../components/ui/Textarea";
 import { ToastContainer } from "../../components/ui/Toast";
 import { useToast } from "../../hooks/useToast";
 import { useI18n } from "../../i18n";
 import { formatApiErrorMessage } from "../../lib/error-message";
-import { formatGoDuration, formatRelativeTime } from "../../lib/time";
-import { clearAllPlatformLeases, deletePlatform, getPlatform, resetPlatform, updatePlatform } from "./api";
+import { formatDateTime, formatGoDuration, formatRelativeTime } from "../../lib/time";
+import {
+  clearAllPlatformLeases,
+  deletePlatform,
+  deletePlatformLease,
+  getPlatform,
+  listPlatformLeases,
+  resetPlatform,
+  updatePlatform,
+} from "./api";
 import {
   allocationPolicies,
   allocationPolicyLabel,
@@ -32,13 +44,19 @@ import {
   toPlatformUpdateInput,
   type PlatformFormValues,
 } from "./formModel";
+import { PlatformAccessPanel } from "./PlatformAccessPanel";
 import { PlatformMonitorPanel } from "./PlatformMonitorPanel";
+import type { PlatformLease } from "./types";
 
-type PlatformDetailTab = "monitor" | "config" | "ops";
+type PlatformDetailTab = "monitor" | "access" | "config" | "ops";
 
 const ZERO_UUID = "00000000-0000-0000-0000-000000000000";
+const LEASE_MANAGEMENT_ANCHOR = "platform-lease-management";
+const LEASE_SEARCH_DEBOUNCE_MS = 300;
+const LEASE_PAGE_SIZE_OPTIONS = [10, 25, 50, 100] as const;
 const DETAIL_TABS: Array<{ key: PlatformDetailTab; label: string; hint: string }> = [
   { key: "monitor", label: "监控", hint: "平台运行态趋势和快照" },
+  { key: "access", label: "接入", hint: "复制正向/反向代理地址" },
   { key: "config", label: "配置", hint: "过滤规则与分配策略" },
   { key: "ops", label: "运维", hint: "重置、清租约、删除操作" },
 ];
@@ -46,8 +64,13 @@ const DETAIL_TABS: Array<{ key: PlatformDetailTab; label: string; hint: string }
 export function PlatformDetailPage() {
   const { t } = useI18n();
   const { platformId = "" } = useParams();
+  const location = useLocation();
   const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState<PlatformDetailTab>("monitor");
+  const [leasePage, setLeasePage] = useState(0);
+  const [leasePageSize, setLeasePageSize] = useState<number>(LEASE_PAGE_SIZE_OPTIONS[0]);
+  const [leaseSearch, setLeaseSearch] = useState("");
+  const [debouncedLeaseSearch, setDebouncedLeaseSearch] = useState("");
   const { toasts, showToast, dismissToast } = useToast();
   const queryClient = useQueryClient();
   const formatPlatformMutationError = (error: unknown) => {
@@ -68,6 +91,37 @@ export function PlatformDetailPage() {
 
   const platform = platformQuery.data ?? null;
 
+  const leaseQuery = useQuery({
+    queryKey: ["platform-leases", platform?.id, leasePage, leasePageSize, debouncedLeaseSearch],
+    queryFn: () => {
+      if (!platform) {
+        throw new Error("平台不存在或已被删除");
+      }
+      return listPlatformLeases(platform.id, {
+        limit: leasePageSize,
+        offset: leasePage * leasePageSize,
+        account: debouncedLeaseSearch,
+        fuzzy: debouncedLeaseSearch ? true : undefined,
+        sort_by: "expiry",
+        sort_order: "asc",
+      });
+    },
+    enabled: Boolean(platform?.id) && activeTab === "ops",
+    refetchInterval: 30_000,
+    placeholderData: (previous) => previous,
+  });
+
+  const leasesPage = leaseQuery.data ?? {
+    items: [],
+    total: 0,
+    limit: leasePageSize,
+    offset: leasePage * leasePageSize,
+  };
+  const leases = leasesPage.items;
+  const isLeasePageTransitioning = leaseQuery.isFetching && leaseQuery.isPlaceholderData;
+  const visibleLeases = isLeasePageTransitioning ? [] : leases;
+  const leaseTotalPages = Math.max(1, Math.ceil(leasesPage.total / leasePageSize));
+
   const editForm = useForm<PlatformFormValues>({
     resolver: zodResolver(platformFormSchema),
     defaultValues: defaultPlatformFormValues,
@@ -80,6 +134,44 @@ export function PlatformDetailPage() {
     }
     editForm.reset(platformToFormValues(platform));
   }, [platform, editForm]);
+
+  useEffect(() => {
+    setLeasePage(0);
+    setLeaseSearch("");
+    setDebouncedLeaseSearch("");
+  }, [platformId]);
+
+  useEffect(() => {
+    const timeoutID = window.setTimeout(() => {
+      setDebouncedLeaseSearch(leaseSearch.trim());
+      setLeasePage(0);
+    }, LEASE_SEARCH_DEBOUNCE_MS);
+    return () => window.clearTimeout(timeoutID);
+  }, [leaseSearch]);
+
+  useEffect(() => {
+    const maxPage = Math.max(0, Math.ceil(leasesPage.total / leasePageSize) - 1);
+    if (leasePage > maxPage) {
+      setLeasePage(maxPage);
+    }
+  }, [leasePage, leasePageSize, leasesPage.total]);
+
+  useEffect(() => {
+    const tab = new URLSearchParams(location.search).get("tab");
+    if (tab === "ops" || location.hash === `#${LEASE_MANAGEMENT_ANCHOR}`) {
+      setActiveTab("ops");
+    }
+  }, [location.hash, location.search]);
+
+  useEffect(() => {
+    if (activeTab !== "ops" || location.hash !== `#${LEASE_MANAGEMENT_ANCHOR}`) {
+      return;
+    }
+
+    window.requestAnimationFrame(() => {
+      document.getElementById(LEASE_MANAGEMENT_ANCHOR)?.scrollIntoView({ block: "start" });
+    });
+  }, [activeTab, location.hash]);
 
   const invalidatePlatform = async (id: string) => {
     await Promise.all([
@@ -132,8 +224,33 @@ export function PlatformDetailPage() {
       return platform;
     },
     onSuccess: async (updated) => {
-      await queryClient.invalidateQueries({ queryKey: ["platform-monitor"] });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["platform-monitor"] }),
+        queryClient.invalidateQueries({ queryKey: ["platform-leases", updated.id] }),
+      ]);
       showToast("success", t("平台 {{name}} 的所有租约已清除", { name: updated.name }));
+    },
+    onError: (error) => {
+      showToast("error", formatApiErrorMessage(error, t));
+    },
+  });
+
+  const releaseLeaseMutation = useMutation({
+    mutationFn: async (lease: PlatformLease) => {
+      if (!platform) {
+        throw new Error("平台不存在或已被删除");
+      }
+      await deletePlatformLease(platform.id, lease.account);
+      return lease;
+    },
+    onSuccess: async (lease) => {
+      if (platform) {
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: ["platform-monitor"] }),
+          queryClient.invalidateQueries({ queryKey: ["platform-leases", platform.id] }),
+        ]);
+      }
+      showToast("success", t("账号 {{account}} 的租约已释放", { account: lease.account }));
     },
     onError: (error) => {
       showToast("error", formatApiErrorMessage(error, t));
@@ -186,6 +303,82 @@ export function PlatformDetailPage() {
     }
     await clearLeasesMutation.mutateAsync();
   };
+
+  const handleReleaseLease = async (lease: PlatformLease) => {
+    const confirmed = window.confirm(t("确认释放账号 {{account}} 的租约？", { account: lease.account }));
+    if (!confirmed) {
+      return;
+    }
+    await releaseLeaseMutation.mutateAsync(lease);
+  };
+
+  const changeLeasePageSize = (next: number) => {
+    setLeasePageSize(next);
+    setLeasePage(0);
+  };
+
+  const leaseColumns: ColumnDef<PlatformLease>[] = [
+    {
+      accessorKey: "account",
+      header: t("账号"),
+      cell: ({ row }) => (
+        <span className="lease-account-cell" title={row.original.account}>
+          {row.original.account || "-"}
+        </span>
+      ),
+    },
+    {
+      id: "node",
+      header: t("节点"),
+      cell: ({ row }) => {
+        const lease = row.original;
+        return (
+          <span className="lease-node-cell" title={lease.node_tag || lease.node_hash}>
+            <strong>{lease.node_tag || "-"}</strong>
+            <small>{lease.node_hash || "-"}</small>
+          </span>
+        );
+      },
+    },
+    {
+      accessorKey: "egress_ip",
+      header: t("出口 IP"),
+      cell: ({ row }) => row.original.egress_ip || "-",
+    },
+    {
+      accessorKey: "expiry",
+      header: t("过期时间"),
+      cell: ({ row }) => formatDateTime(row.original.expiry),
+    },
+    {
+      accessorKey: "last_accessed",
+      header: t("最后访问"),
+      cell: ({ row }) => formatDateTime(row.original.last_accessed),
+    },
+    {
+      id: "actions",
+      header: t("操作"),
+      cell: ({ row }) => {
+        const lease = row.original;
+        const releasing = releaseLeaseMutation.isPending && releaseLeaseMutation.variables?.account === lease.account;
+        return (
+          <div className="lease-row-actions" onClick={(event) => event.stopPropagation()}>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => void handleReleaseLease(lease)}
+              disabled={releasing || clearLeasesMutation.isPending}
+              title={t("释放租约")}
+              aria-label={t("释放账号 {{account}} 的租约", { account: lease.account })}
+              style={{ color: "var(--delete-btn-color, #c27070)" }}
+            >
+              <Trash2 size={14} />
+            </Button>
+          </div>
+        );
+      },
+    },
+  ];
 
   const stickyTTL = platform ? formatGoDuration(platform.sticky_ttl, t("默认")) : t("默认");
   const regionCount = platform?.region_filters.length ?? 0;
@@ -274,6 +467,10 @@ export function PlatformDetailPage() {
                   <span>{t("空账号行为")}</span>
                   <strong>{t(emptyAccountBehaviorLabel[platform.reverse_proxy_empty_account_behavior])}</strong>
                 </span>
+                <span className="platform-fact">
+                  <span>{t("请求失败熔断")}</span>
+                  <strong>{platform.passive_circuit_breaker_disabled ? t("已关闭") : t("已开启")}</strong>
+                </span>
               </div>
             </div>
           </Card>
@@ -308,6 +505,17 @@ export function PlatformDetailPage() {
                 className="platform-detail-panel"
               >
                 <PlatformMonitorPanel platform={platform} />
+              </div>
+            ) : null}
+
+            {activeTab === "access" ? (
+              <div
+                id="platform-tabpanel-access"
+                role="tabpanel"
+                aria-labelledby="platform-tab-access"
+                className="platform-detail-panel"
+              >
+                <PlatformAccessPanel platformName={platform.name} />
               </div>
             ) : null}
 
@@ -376,6 +584,26 @@ export function PlatformDetailPage() {
                   </div>
 
                   <div className="field-group">
+                    <label className="field-label" htmlFor="detail-edit-passive-circuit-breaker" style={{ visibility: "hidden" }}>
+                      {t("禁用请求失败熔断")}
+                    </label>
+                    <div className="subscription-switch-item">
+                      <label className="subscription-switch-label" htmlFor="detail-edit-passive-circuit-breaker">
+                        <span>{t("禁用请求失败熔断")}</span>
+                        <span
+                          className="subscription-info-icon"
+                          title={t("开启后，此平台的代理请求失败不会增加节点熔断计数；主动探测不受影响。")}
+                          aria-label={t("开启后，此平台的代理请求失败不会增加节点熔断计数；主动探测不受影响。")}
+                          tabIndex={0}
+                        >
+                          <Info size={13} />
+                        </span>
+                      </label>
+                      <Switch id="detail-edit-passive-circuit-breaker" {...editForm.register("passive_circuit_breaker_disabled")} />
+                    </div>
+                  </div>
+
+                  <div className="field-group">
                     <label className="field-label" htmlFor="detail-edit-empty-account-behavior">
                       {t("反向代理账号为空行为")}
                     </label>
@@ -409,26 +637,19 @@ export function PlatformDetailPage() {
                   </div>
 
                   <div className="field-group">
-                    <label className="field-label field-label-with-info" htmlFor="detail-edit-regex">
-                      <span>{t("节点名正则过滤规则")}</span>
-                      <span
-                        className="subscription-info-icon"
-                        title={t("满足所有正则表达式的节点才会被选择")}
-                        aria-label={t("满足所有正则表达式的节点才会被选择")}
-                        tabIndex={0}
-                      >
-                        <Info size={13} />
-                      </span>
+                    <label className="field-label" htmlFor="detail-edit-regex">
+                      {t("节点名正则过滤规则")}
                     </label>
                     <Textarea
                       id="detail-edit-regex"
                       rows={6}
-                      placeholder={t("每行一条，例如 .*专线.* 或 <订阅名>/.*")}
+                      placeholder={t("每行一条正则表达式，例如：\n\n香港\n日本\n*专线\n!过期\n!失效\n\n表示：选择【香港】或【日本】的【专线】节点，并排除包含【过期】或【失效】的节点。")}
                       {...editForm.register("regex_filters_text")}
                     />
-                    <p className="muted" style={{ marginTop: 4, fontSize: 12 }}>
-                      {t("技巧：<订阅名>/.* 可筛选来自该订阅的节点。")}
-                    </p>
+                    <div className="muted" style={{ marginTop: 4, fontSize: 12 }}>
+                      <div>{t("普通正则表达式表示满足其一，* 开头表示必须包含，! 开头表示排除。")}</div>
+                      <div>{t("技巧：^<订阅名>/ 可筛选来自该订阅的节点。")}</div>
+                    </div>
                   </div>
 
                   <div className="field-group">
@@ -456,49 +677,119 @@ export function PlatformDetailPage() {
             ) : null}
 
             {activeTab === "ops" ? (
-              <section
+              <div
                 id="platform-tabpanel-ops"
                 role="tabpanel"
                 aria-labelledby="platform-tab-ops"
-                className="platform-detail-tabpanel platform-ops-section"
+                className="platform-detail-tabpanel platform-ops-tabpanel"
               >
-                <div className="platform-drawer-section-head">
-                  <h4>{t("运维操作")}</h4>
-                  <p>{t("以下操作会直接作用于当前平台，请谨慎执行。")}</p>
-                </div>
-
-                <div className="platform-ops-list">
-                  <div className="platform-op-item">
-                    <div className="platform-op-copy">
-                      <h5>{t("重置为默认配置")}</h5>
-                      <p className="platform-op-hint">{t("恢复默认设置，并覆盖当前修改。")}</p>
-                    </div>
-                    <Button variant="secondary" onClick={() => void resetMutation.mutateAsync()} disabled={resetMutation.isPending}>
-                      {resetMutation.isPending ? t("重置中...") : t("重置为默认配置")}
-                    </Button>
+                <section className="platform-ops-section">
+                  <div className="platform-drawer-section-head">
+                    <h4>{t("运维操作")}</h4>
+                    <p>{t("以下操作会直接作用于当前平台，请谨慎执行。")}</p>
                   </div>
 
-                  <div className="platform-op-item">
-                    <div className="platform-op-copy">
-                      <h5>{t("清除所有租约")}</h5>
-                      <p className="platform-op-hint">{t("立即清除当前平台的全部租约，下次请求将重新分配出口。")}</p>
+                  <div className="platform-ops-list">
+                    <div className="platform-op-item">
+                      <div className="platform-op-copy">
+                        <h5>{t("重置为默认配置")}</h5>
+                        <p className="platform-op-hint">{t("恢复默认设置，并覆盖当前修改。")}</p>
+                      </div>
+                      <Button variant="secondary" onClick={() => void resetMutation.mutateAsync()} disabled={resetMutation.isPending}>
+                        {resetMutation.isPending ? t("重置中...") : t("重置为默认配置")}
+                      </Button>
                     </div>
-                    <Button variant="danger" onClick={() => void handleClearAllLeases()} disabled={clearLeasesMutation.isPending}>
-                      {clearLeasesMutation.isPending ? t("清除中...") : t("清除所有租约")}
-                    </Button>
+
+                    <div className="platform-op-item">
+                      <div className="platform-op-copy">
+                        <h5>{t("清除所有租约")}</h5>
+                        <p className="platform-op-hint">{t("立即清除当前平台的全部租约，下次请求将重新分配出口。")}</p>
+                      </div>
+                      <Button variant="danger" onClick={() => void handleClearAllLeases()} disabled={clearLeasesMutation.isPending}>
+                        {clearLeasesMutation.isPending ? t("清除中...") : t("清除所有租约")}
+                      </Button>
+                    </div>
+
+                    <div className="platform-op-item">
+                      <div className="platform-op-copy">
+                        <h5>{t("删除平台")}</h5>
+                        <p className="platform-op-hint">{t("永久删除当前平台及其配置，操作不可撤销。")}</p>
+                      </div>
+                      <Button variant="danger" onClick={() => void handleDelete()} disabled={deleteDisabled}>
+                        {deleteMutation.isPending ? t("删除中...") : t("删除平台")}
+                      </Button>
+                    </div>
+                  </div>
+                </section>
+
+                <section id={LEASE_MANAGEMENT_ANCHOR} className="platform-lease-section">
+                  <div className="platform-drawer-section-head platform-lease-head">
+                    <div className="platform-lease-heading">
+                      <h4>{t("租约管理")}</h4>
+                      <p>{t("查看当前平台的租约绑定，并按账号释放单个租约。")}</p>
+                    </div>
+                    <div className="platform-lease-toolbar">
+                      <label className="search-box platform-lease-search" htmlFor="platform-lease-search">
+                        <Search size={16} />
+                        <Input
+                          id="platform-lease-search"
+                          type="search"
+                          placeholder={t("搜索账号")}
+                          aria-label={t("搜索账号")}
+                          value={leaseSearch}
+                          onChange={(event) => setLeaseSearch(event.target.value)}
+                        />
+                      </label>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => void leaseQuery.refetch()}
+                        disabled={leaseQuery.isFetching}
+                      >
+                        <RefreshCw size={16} className={leaseQuery.isFetching ? "spin" : undefined} />
+                        {t("刷新")}
+                      </Button>
+                    </div>
                   </div>
 
-                  <div className="platform-op-item">
-                    <div className="platform-op-copy">
-                      <h5>{t("删除平台")}</h5>
-                      <p className="platform-op-hint">{t("永久删除当前平台及其配置，操作不可撤销。")}</p>
+                  {leaseQuery.isLoading || isLeasePageTransitioning ? <p className="muted">{t("正在加载租约数据...")}</p> : null}
+
+                  {leaseQuery.isError ? (
+                    <div className="callout callout-error">
+                      <AlertTriangle size={14} />
+                      <span>{formatApiErrorMessage(leaseQuery.error, t)}</span>
                     </div>
-                    <Button variant="danger" onClick={() => void handleDelete()} disabled={deleteDisabled}>
-                      {deleteMutation.isPending ? t("删除中...") : t("删除平台")}
-                    </Button>
-                  </div>
-                </div>
-              </section>
+                  ) : null}
+
+                  {!leaseQuery.isLoading && !leaseQuery.isError && !isLeasePageTransitioning && !visibleLeases.length ? (
+                    <div className="empty-box">
+                      <Sparkles size={16} />
+                      <p>{debouncedLeaseSearch ? t("没有匹配的租约") : t("当前平台暂无租约")}</p>
+                    </div>
+                  ) : null}
+
+                  {visibleLeases.length ? (
+                    <DataTable
+                      data={visibleLeases}
+                      columns={leaseColumns}
+                      getRowId={(lease) => lease.account}
+                      className="data-table-leases"
+                      wrapClassName="platform-lease-table-wrap"
+                    />
+                  ) : null}
+
+                  <OffsetPagination
+                    page={leasePage}
+                    totalPages={leaseTotalPages}
+                    totalItems={leasesPage.total}
+                    pageSize={leasePageSize}
+                    pageSizeOptions={LEASE_PAGE_SIZE_OPTIONS}
+                    disabled={isLeasePageTransitioning}
+                    onPageChange={setLeasePage}
+                    onPageSizeChange={changeLeasePageSize}
+                  />
+                </section>
+              </div>
             ) : null}
           </Card>
         </>

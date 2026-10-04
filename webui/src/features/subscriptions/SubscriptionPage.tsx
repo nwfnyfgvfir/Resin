@@ -35,6 +35,10 @@ import type { Subscription, SubscriptionBackupFile } from "./types";
 
 type EnabledFilter = "all" | "enabled" | "disabled";
 type SubscriptionSourceType = "remote" | "local";
+type SubscriptionEnabledMutation = {
+  subscription: Subscription;
+  enabled: boolean;
+};
 
 const SUBSCRIPTION_SOURCE_TABS: Array<{ key: SubscriptionSourceType; label: string; hint: string }> = [
   { key: "remote", label: "远程", hint: "从 HTTP/HTTPS 订阅链接拉取内容" },
@@ -50,6 +54,7 @@ const subscriptionCreateSchema = z.object({
   ephemeral_node_evict_delay: z.string().trim().min(1, "临时节点驱逐延迟不能为空"),
   enabled: z.boolean(),
   ephemeral: z.boolean(),
+  incremental_alive_nodes: z.boolean(),
 }).superRefine((value, ctx) => {
   const url = value.url.trim();
   const content = value.content.trim();
@@ -78,6 +83,7 @@ const LOCAL_SOURCE_UPDATE_INTERVAL = "12h";
 const SUBSCRIPTION_DISABLE_HINT = "禁用订阅后，相关节点不会参与平台路由、健康统计或自动探测。";
 const SUBSCRIPTION_EPHEMERAL_HINT = "临时订阅的非健康节点会在一段时间后被自动删除。若开启了“节点全部删除后自动删除订阅”，节点全部删完后订阅本身也会被删除。";
 const SUBSCRIPTION_BACKUP_FILENAME = "resin-subscriptions-backup.json";
+const SUBSCRIPTION_INCREMENTAL_HINT = "开启后刷新时保留当前仍存活的旧节点，仅清理失效旧节点，并合并新订阅内容；关闭后仅保留刷新后的订阅内容。";
 
 function extractHostname(url: string): string {
   try {
@@ -97,6 +103,7 @@ function subscriptionToEditForm(subscription: Subscription): SubscriptionEditFor
     ephemeral_node_evict_delay: subscription.ephemeral_node_evict_delay,
     enabled: subscription.enabled,
     ephemeral: subscription.ephemeral,
+    incremental_alive_nodes: subscription.incremental_alive_nodes,
   };
 }
 
@@ -155,8 +162,10 @@ export function SubscriptionPage() {
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [pendingRefreshIds, setPendingRefreshIds] = useState<Set<string>>(() => new Set());
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [pendingEnabledStates, setPendingEnabledStates] = useState<ReadonlyMap<string, boolean>>(() => new Map());
   const { toasts, showToast, dismissToast } = useToast();
   const pendingRefreshIdsRef = useRef<Set<string>>(new Set());
+  const pendingEnabledStatesRef = useRef<Map<string, boolean>>(new Map());
 
   const queryClient = useQueryClient();
   const enabledValue = parseEnabledFilter(enabledFilter);
@@ -213,6 +222,7 @@ export function SubscriptionPage() {
       ephemeral_node_evict_delay: "72h",
       enabled: true,
       ephemeral: false,
+      incremental_alive_nodes: false,
     },
   });
 
@@ -230,6 +240,7 @@ export function SubscriptionPage() {
       ephemeral_node_evict_delay: "72h",
       enabled: true,
       ephemeral: false,
+      incremental_alive_nodes: false,
     },
   });
 
@@ -310,6 +321,7 @@ export function SubscriptionPage() {
         ephemeral_node_evict_delay: "72h",
         enabled: true,
         ephemeral: false,
+        incremental_alive_nodes: false,
       });
       showToast("success", t("订阅 {{name}} 创建成功", { name: created.name }));
     },
@@ -330,6 +342,7 @@ export function SubscriptionPage() {
         ephemeral_node_evict_delay: formData.ephemeral_node_evict_delay.trim(),
         enabled: formData.enabled,
         ephemeral: formData.ephemeral,
+        incremental_alive_nodes: formData.incremental_alive_nodes,
         ...(formData.source_type === "remote"
           ? { url: formData.url.trim() }
           : { content: formData.content }),
@@ -436,6 +449,24 @@ export function SubscriptionPage() {
     },
   });
 
+  const toggleEnabledMutation = useMutation({
+    mutationFn: ({ subscription, enabled }: SubscriptionEnabledMutation) =>
+      updateSubscription(subscription.id, { enabled }),
+    onSuccess: async (updated, { enabled }) => {
+      await invalidateSubscriptionsAndNodes();
+      showToast(
+        "success",
+        enabled
+          ? t("订阅 {{name}} 已启用", { name: updated.name })
+          : t("订阅 {{name}} 已禁用", { name: updated.name }),
+      );
+    },
+    onError: (error) => {
+      showToast("error", formatApiErrorMessage(error, t));
+    },
+  });
+  const toggleSubscriptionEnabledMutateAsync = toggleEnabledMutation.mutateAsync;
+
   const markRefreshPending = useCallback((subscriptionId: string): boolean => {
     if (pendingRefreshIdsRef.current.has(subscriptionId)) {
       return false;
@@ -458,6 +489,37 @@ export function SubscriptionPage() {
   }, []);
 
   const isRefreshPending = useCallback((subscriptionId: string): boolean => pendingRefreshIds.has(subscriptionId), [pendingRefreshIds]);
+
+  const markEnabledTogglePending = useCallback((subscriptionId: string, enabled: boolean): boolean => {
+    if (pendingEnabledStatesRef.current.has(subscriptionId)) {
+      return false;
+    }
+    const next = new Map(pendingEnabledStatesRef.current);
+    next.set(subscriptionId, enabled);
+    pendingEnabledStatesRef.current = next;
+    setPendingEnabledStates(next);
+    return true;
+  }, []);
+
+  const clearEnabledTogglePending = useCallback((subscriptionId: string) => {
+    if (!pendingEnabledStatesRef.current.has(subscriptionId)) {
+      return;
+    }
+    const next = new Map(pendingEnabledStatesRef.current);
+    next.delete(subscriptionId);
+    pendingEnabledStatesRef.current = next;
+    setPendingEnabledStates(next);
+  }, []);
+
+  const isEnabledTogglePending = useCallback(
+    (subscriptionId: string): boolean => pendingEnabledStates.has(subscriptionId),
+    [pendingEnabledStates],
+  );
+
+  const displayedEnabledState = useCallback(
+    (subscription: Subscription): boolean => pendingEnabledStates.get(subscription.id) ?? subscription.enabled,
+    [pendingEnabledStates],
+  );
 
   const cleanupCircuitOpenNodesMutation = useMutation({
     mutationFn: async (subscription: Subscription) => {
@@ -485,6 +547,7 @@ export function SubscriptionPage() {
       ephemeral_node_evict_delay: values.ephemeral_node_evict_delay.trim(),
       enabled: values.enabled,
       ephemeral: values.ephemeral,
+      incremental_alive_nodes: values.incremental_alive_nodes,
       ...(values.source_type === "remote"
         ? { url: values.url.trim() }
         : { content: values.content }),
@@ -578,6 +641,19 @@ export function SubscriptionPage() {
     }
   }, [clearRefreshPending, markRefreshPending, refreshSubscriptionMutateAsync]);
 
+  const handleEnabledChange = useCallback(async (subscription: Subscription, enabled: boolean) => {
+    if (!markEnabledTogglePending(subscription.id, enabled)) {
+      return;
+    }
+    try {
+      await toggleSubscriptionEnabledMutateAsync({ subscription, enabled });
+    } catch {
+      // Mutation callbacks already surface the failure to the user.
+    } finally {
+      clearEnabledTogglePending(subscription.id);
+    }
+  }, [clearEnabledTogglePending, markEnabledTogglePending, toggleSubscriptionEnabledMutateAsync]);
+
   const changePageSize = (next: number) => {
     setPageSize(next);
     setPage(0);
@@ -647,17 +723,17 @@ export function SubscriptionPage() {
       }),
       col.display({
         id: "status",
-        header: t("状态"),
+        header: t("刷新状态"),
         cell: (info) => {
           const s = info.row.original;
           return (
             <div className="subscriptions-status-cell">
-              {!s.enabled ? (
-                <Badge variant="warning">{t("已禁用")}</Badge>
-              ) : s.last_error ? (
+              {s.last_error ? (
                 <Badge variant="danger">{t("错误")}</Badge>
-              ) : (
+              ) : s.last_checked ? (
                 <Badge variant="success">{t("正常")}</Badge>
+              ) : (
+                <Badge variant="muted">{t("未检查")}</Badge>
               )}
             </div>
           );
@@ -670,6 +746,27 @@ export function SubscriptionPage() {
       col.accessor("last_updated", {
         header: t("上次更新"),
         cell: (info) => formatRelativeTime(info.getValue() || ""),
+      }),
+      col.display({
+        id: "enabled",
+        header: t("启用"),
+        cell: (info) => {
+          const s = info.row.original;
+          const enabled = displayedEnabledState(s);
+          const toggleLabel = enabled
+            ? t("停用订阅 {{name}}", { name: s.name })
+            : t("启用订阅 {{name}}", { name: s.name });
+          return (
+            <div className="subscription-enabled-cell" title={toggleLabel} onClick={(event) => event.stopPropagation()}>
+              <Switch
+                checked={enabled}
+                disabled={isEnabledTogglePending(s.id)}
+                onChange={(event) => void handleEnabledChange(s, event.target.checked)}
+                aria-label={toggleLabel}
+              />
+            </div>
+          );
+        },
       }),
       col.display({
         id: "actions",
@@ -713,7 +810,22 @@ export function SubscriptionPage() {
         },
       }),
     ],
-    [allCurrentPageSelected, col, handleDelete, handleRefresh, isDeletePending, isRefreshPending, openDrawer, selectedSubscriptionIds, t, toggleCurrentPageSelection, toggleSubscriptionSelection]
+    [
+      allCurrentPageSelected,
+      col,
+      displayedEnabledState,
+      handleDelete,
+      handleEnabledChange,
+      handleRefresh,
+      isDeletePending,
+      isEnabledTogglePending,
+      isRefreshPending,
+      openDrawer,
+      selectedSubscriptionIds,
+      t,
+      toggleCurrentPageSelection,
+      toggleSubscriptionSelection,
+    ]
   );
 
   return (
@@ -874,9 +986,6 @@ export function SubscriptionPage() {
                 <p>{selectedSubscription.id}</p>
               </div>
               <div className="drawer-header-actions">
-                <Badge variant={selectedSubscription.enabled ? "success" : "warning"}>
-                  {selectedSubscription.enabled ? t("运行中") : t("已停用")}
-                </Badge>
                 <Button
                   variant="ghost"
                   size="sm"
@@ -921,6 +1030,21 @@ export function SubscriptionPage() {
 
                 <form className="form-grid" onSubmit={onEditSubmit}>
                   <input type="hidden" {...editForm.register("source_type")} />
+
+                  <div className="subscription-switch-item field-span-2">
+                    <label className="subscription-switch-label" htmlFor="edit-sub-enabled">
+                      <span>{t("启用")}</span>
+                      <span
+                        className="subscription-info-icon"
+                        title={t(SUBSCRIPTION_DISABLE_HINT)}
+                        aria-label={t(SUBSCRIPTION_DISABLE_HINT)}
+                        tabIndex={0}
+                      >
+                        <Info size={13} />
+                      </span>
+                    </label>
+                    <Switch id="edit-sub-enabled" {...editForm.register("enabled")} />
+                  </div>
 
                   <div className="field-group">
                     <label className="field-label" htmlFor="edit-sub-name">
@@ -1014,6 +1138,26 @@ export function SubscriptionPage() {
                   </div>
 
                   <div className="field-group">
+                    <label className="field-label" htmlFor="edit-sub-incremental-alive-nodes" style={{ visibility: "hidden" }}>
+                      {t("存活节点增量模式")}
+                    </label>
+                    <div className="subscription-switch-item">
+                      <label className="subscription-switch-label" htmlFor="edit-sub-incremental-alive-nodes">
+                        <span>{t("存活节点增量模式")}</span>
+                        <span
+                          className="subscription-info-icon"
+                          title={t(SUBSCRIPTION_INCREMENTAL_HINT)}
+                          aria-label={t(SUBSCRIPTION_INCREMENTAL_HINT)}
+                          tabIndex={0}
+                        >
+                          <Info size={13} />
+                        </span>
+                      </label>
+                      <Switch id="edit-sub-incremental-alive-nodes" {...editForm.register("incremental_alive_nodes")} />
+                    </div>
+                  </div>
+
+                  <div className="field-group">
                     <label className="field-label" htmlFor="edit-sub-ephemeral-evict-delay">
                       {t("临时节点驱逐延迟")}
                     </label>
@@ -1027,21 +1171,6 @@ export function SubscriptionPage() {
                     {editForm.formState.errors.ephemeral_node_evict_delay?.message ? (
                       <p className="field-error">{t(editForm.formState.errors.ephemeral_node_evict_delay.message)}</p>
                     ) : null}
-                  </div>
-
-                  <div className="subscription-switch-item">
-                    <label className="subscription-switch-label" htmlFor="edit-sub-enabled">
-                      <span>{t("启用")}</span>
-                      <span
-                        className="subscription-info-icon"
-                        title={t(SUBSCRIPTION_DISABLE_HINT)}
-                        aria-label={t(SUBSCRIPTION_DISABLE_HINT)}
-                        tabIndex={0}
-                      >
-                        <Info size={13} />
-                      </span>
-                    </label>
-                    <Switch id="edit-sub-enabled" {...editForm.register("enabled")} />
                   </div>
 
                   <div className="platform-config-actions">
@@ -1118,6 +1247,21 @@ export function SubscriptionPage() {
 
             <form className="form-grid" onSubmit={onCreateSubmit}>
               <input type="hidden" {...createForm.register("source_type")} />
+
+              <div className="subscription-switch-item field-span-2">
+                <label className="subscription-switch-label" htmlFor="create-sub-enabled">
+                  <span>{t("启用")}</span>
+                  <span
+                    className="subscription-info-icon"
+                    title={t(SUBSCRIPTION_DISABLE_HINT)}
+                    aria-label={t(SUBSCRIPTION_DISABLE_HINT)}
+                    tabIndex={0}
+                  >
+                    <Info size={13} />
+                  </span>
+                </label>
+                <Switch id="create-sub-enabled" {...createForm.register("enabled")} />
+              </div>
 
               <div className="field-group field-span-2">
                 <label className="field-label" htmlFor="create-sub-name">
@@ -1225,6 +1369,26 @@ export function SubscriptionPage() {
               </div>
 
               <div className="field-group">
+                <label className="field-label" htmlFor="create-sub-incremental-alive-nodes" style={{ visibility: "hidden" }}>
+                  {t("存活节点增量模式")}
+                </label>
+                <div className="subscription-switch-item">
+                  <label className="subscription-switch-label" htmlFor="create-sub-incremental-alive-nodes">
+                    <span>{t("存活节点增量模式")}</span>
+                    <span
+                      className="subscription-info-icon"
+                      title={t(SUBSCRIPTION_INCREMENTAL_HINT)}
+                      aria-label={t(SUBSCRIPTION_INCREMENTAL_HINT)}
+                      tabIndex={0}
+                    >
+                      <Info size={13} />
+                    </span>
+                  </label>
+                  <Switch id="create-sub-incremental-alive-nodes" {...createForm.register("incremental_alive_nodes")} />
+                </div>
+              </div>
+
+              <div className="field-group">
                 <label className="field-label" htmlFor="create-sub-ephemeral-evict-delay">
                   {t("临时节点驱逐延迟")}
                 </label>
@@ -1238,21 +1402,6 @@ export function SubscriptionPage() {
                 {createForm.formState.errors.ephemeral_node_evict_delay?.message ? (
                   <p className="field-error">{t(createForm.formState.errors.ephemeral_node_evict_delay.message)}</p>
                 ) : null}
-              </div>
-
-              <div className="subscription-switch-item">
-                <label className="subscription-switch-label" htmlFor="create-sub-enabled">
-                  <span>{t("启用")}</span>
-                  <span
-                    className="subscription-info-icon"
-                    title={t(SUBSCRIPTION_DISABLE_HINT)}
-                    aria-label={t(SUBSCRIPTION_DISABLE_HINT)}
-                    tabIndex={0}
-                  >
-                    <Info size={13} />
-                  </span>
-                </label>
-                <Switch id="create-sub-enabled" {...createForm.register("enabled")} />
               </div>
 
               <div className="detail-actions" style={{ justifyContent: "flex-end" }}>

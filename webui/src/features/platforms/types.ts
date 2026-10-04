@@ -13,6 +13,7 @@ export type Platform = {
   reverse_proxy_empty_account_behavior: PlatformEmptyAccountBehavior;
   reverse_proxy_fixed_account_header: string;
   allocation_policy: PlatformAllocationPolicy;
+  passive_circuit_breaker_disabled: boolean;
   updated_at: string;
 };
 
@@ -32,6 +33,7 @@ export type PlatformCreateInput = {
   reverse_proxy_empty_account_behavior?: PlatformEmptyAccountBehavior;
   reverse_proxy_fixed_account_header?: string;
   allocation_policy?: PlatformAllocationPolicy;
+  passive_circuit_breaker_disabled?: boolean;
 };
 
 export type PlatformUpdateInput = {
@@ -43,4 +45,27 @@ export type PlatformUpdateInput = {
   reverse_proxy_empty_account_behavior?: PlatformEmptyAccountBehavior;
   reverse_proxy_fixed_account_header?: string;
   allocation_policy?: PlatformAllocationPolicy;
+  passive_circuit_breaker_disabled?: boolean;
+};
+
+export type PlatformLease = {
+  platform_id: string;
+  account: string;
+  node_hash: string;
+  node_tag: string;
+  egress_ip: string;
+  expiry: string;
+  last_accessed: string;
+};
+
+export type PlatformLeaseSortBy = "account" | "expiry" | "last_accessed";
+export type SortOrder = "asc" | "desc";
+
+export type ListPlatformLeasesInput = {
+  limit?: number;
+  offset?: number;
+  account?: string;
+  fuzzy?: boolean;
+  sort_by?: PlatformLeaseSortBy;
+  sort_order?: SortOrder;
 };

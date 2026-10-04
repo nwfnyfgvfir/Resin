@@ -3,6 +3,7 @@ package proxy
 import (
 	"net"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/Resinat/Resin/internal/routing"
@@ -11,30 +12,28 @@ import (
 // requestLifecycle captures mutable per-request telemetry and emits both
 // metrics and request-log events on completion.
 type requestLifecycle struct {
-	startedAt time.Time
-	events    EventEmitter
-	finished  RequestFinishedEvent
-	log       RequestLogEntry
+	startedAt           time.Time
+	events              EventEmitter
+	finished            RequestFinishedEvent
+	log                 RequestLogEntry
+	firstByteDurationNs atomic.Int64
 
 	reqBodyCapture  *payloadCaptureReadCloser
 	respBodyCapture *payloadCaptureReadCloser
 }
 
-func newRequestLifecycle(
+func newRequestLifecycleFromMetadata(
 	events EventEmitter,
-	r *http.Request,
+	clientRemoteAddr string,
+	method string,
 	proxyType ProxyType,
 	isConnect bool,
 ) *requestLifecycle {
-	method := ""
 	clientIP := ""
-	if r != nil {
-		method = r.Method
-		if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-			clientIP = host
-		} else {
-			clientIP = r.RemoteAddr // fallback: bare IP or unparseable
-		}
+	if host, _, err := net.SplitHostPort(clientRemoteAddr); err == nil {
+		clientIP = host
+	} else {
+		clientIP = clientRemoteAddr // fallback: bare IP or unparseable
 	}
 	return newRequestLifecycleFromFields(events, proxyType, isConnect, method, clientIP)
 }
@@ -63,6 +62,21 @@ func newRequestLifecycleFromFields(
 	}
 }
 
+func newRequestLifecycle(
+	events EventEmitter,
+	r *http.Request,
+	proxyType ProxyType,
+	isConnect bool,
+) *requestLifecycle {
+	method := ""
+	clientRemoteAddr := ""
+	if r != nil {
+		method = r.Method
+		clientRemoteAddr = r.RemoteAddr
+	}
+	return newRequestLifecycleFromMetadata(events, clientRemoteAddr, method, proxyType, isConnect)
+}
+
 func (l *requestLifecycle) finish() {
 	if l.reqBodyCapture != nil {
 		l.log.ReqBody = l.reqBodyCapture.Payload()
@@ -78,8 +92,21 @@ func (l *requestLifecycle) finish() {
 	durationNs := time.Since(l.startedAt).Nanoseconds()
 	l.finished.DurationNs = durationNs
 	l.log.DurationNs = durationNs
+	l.log.FirstByteDurationNs = l.firstByteDurationNs.Load()
 	l.events.EmitRequestFinished(l.finished)
 	l.events.EmitRequestLog(l.log)
+}
+
+func (l *requestLifecycle) markFirstByteReceived() {
+	if l == nil || l.startedAt.IsZero() {
+		return
+	}
+	durationNs := time.Since(l.startedAt).Nanoseconds()
+	if durationNs <= 0 {
+		durationNs = 1
+	}
+	// 首字耗时只记录第一次观测到上游响应字节的时间，避免重试或多回调覆盖。
+	l.firstByteDurationNs.CompareAndSwap(0, durationNs)
 }
 
 func (l *requestLifecycle) setHTTPStatus(code int) {
@@ -91,9 +118,6 @@ func (l *requestLifecycle) setProxyError(pe *ProxyError) {
 		return
 	}
 	l.log.ResinError = pe.ResinError
-	if l.log.HTTPStatus == 0 {
-		l.log.HTTPStatus = pe.HTTPCode
-	}
 }
 
 func (l *requestLifecycle) setUpstreamError(stage string, err error) {

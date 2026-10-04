@@ -14,6 +14,7 @@ type Platform struct {
 	ReverseProxyEmptyAccountBehavior string `json:"reverse_proxy_empty_account_behavior"`
 	ReverseProxyFixedAccountHeader   string `json:"reverse_proxy_fixed_account_header"`
 	AllocationPolicy                 string `json:"allocation_policy"`
+	PassiveCircuitBreakerDisabled    bool   `json:"passive_circuit_breaker_disabled"`
 	UpdatedAtNs                      int64  `json:"updated_at_ns"`
 }
 
@@ -27,9 +28,26 @@ type Subscription struct {
 	UpdateIntervalNs          int64  `json:"update_interval_ns"`
 	Enabled                   bool   `json:"enabled"`
 	Ephemeral                 bool   `json:"ephemeral"`
+	IncrementalAliveNodes     bool   `json:"incremental_alive_nodes"`
 	EphemeralNodeEvictDelayNs int64  `json:"ephemeral_node_evict_delay_ns"`
 	CreatedAtNs               int64  `json:"created_at_ns"`
 	UpdatedAtNs               int64  `json:"updated_at_ns"`
+}
+
+// Endpoint represents a persisted custom inbound listener. The environment-
+// defined default endpoint is synthesized at runtime and is never stored here.
+type Endpoint struct {
+	ID                   string `json:"id"`
+	Port                 int    `json:"port"`
+	Enabled              bool   `json:"enabled"`
+	AllowManagement      bool   `json:"allow_management"`
+	AllowProxy           bool   `json:"allow_proxy"`
+	RequireProxyAuthInfo bool   `json:"require_proxy_auth_info"`
+	AllowHTTPForward     bool   `json:"allow_http_forward"`
+	AllowHTTPReverse     bool   `json:"allow_http_reverse"`
+	AllowSOCKS5          bool   `json:"allow_socks5"`
+	CreatedAtNs          int64  `json:"created_at_ns"`
+	UpdatedAtNs          int64  `json:"updated_at_ns"`
 }
 
 // AccountHeaderRule defines header extraction rules for reverse proxy account matching.

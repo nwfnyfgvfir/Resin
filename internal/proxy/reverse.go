@@ -9,7 +9,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/Resinat/Resin/internal/config"
 	"github.com/Resinat/Resin/internal/netutil"
 	"github.com/Resinat/Resin/internal/outbound"
 	"github.com/Resinat/Resin/internal/platform"
@@ -25,7 +24,6 @@ type PlatformLookup interface {
 // ReverseProxyConfig holds dependencies for the reverse proxy.
 type ReverseProxyConfig struct {
 	ProxyToken        string
-	AuthVersion       string
 	Router            *routing.Router
 	Pool              outbound.PoolAccessor
 	PlatformLookup    PlatformLookup
@@ -35,15 +33,12 @@ type ReverseProxyConfig struct {
 	MetricsSink       MetricsEventSink
 	OutboundTransport OutboundTransportConfig
 	TransportPool     *OutboundTransportPool
+	ProxyBypassRules  []string
 }
 
 // ReverseProxy implements an HTTP reverse proxy.
-// Identity segment format depends on auth version:
-// V1: /PROXY_TOKEN/Platform.Account/protocol/host/path?query
-// LEGACY_V0: /PROXY_TOKEN/Platform:Account/protocol/host/path?query
 type ReverseProxy struct {
 	token             string
-	authVersion       config.AuthVersion
 	router            *routing.Router
 	pool              outbound.PoolAccessor
 	platLook          PlatformLookup
@@ -54,6 +49,9 @@ type ReverseProxy struct {
 	transportConfig   OutboundTransportConfig
 	transportPool     *OutboundTransportPool
 	transportPoolOnce sync.Once
+	directTransport   *http.Transport
+	directOnce        sync.Once
+	bypass            *TargetBypassMatcher
 }
 
 // NewReverseProxy creates a new reverse proxy handler.
@@ -67,13 +65,8 @@ func NewReverseProxy(cfg ReverseProxyConfig) *ReverseProxy {
 	if transportPool == nil {
 		transportPool = NewOutboundTransportPool(transportCfg)
 	}
-	authVersion := config.NormalizeAuthVersion(cfg.AuthVersion)
-	if authVersion == "" {
-		authVersion = config.AuthVersionLegacyV0
-	}
 	return &ReverseProxy{
 		token:           cfg.ProxyToken,
-		authVersion:     authVersion,
 		router:          cfg.Router,
 		pool:            cfg.Pool,
 		platLook:        cfg.PlatformLookup,
@@ -83,17 +76,8 @@ func NewReverseProxy(cfg ReverseProxyConfig) *ReverseProxy {
 		metricsSink:     cfg.MetricsSink,
 		transportConfig: transportCfg,
 		transportPool:   transportPool,
+		bypass:          NewTargetBypassMatcher(cfg.ProxyBypassRules),
 	}
-}
-
-func (p *ReverseProxy) effectiveAuthVersion() config.AuthVersion {
-	if p == nil {
-		return config.AuthVersionLegacyV0
-	}
-	if p.authVersion == config.AuthVersionV1 {
-		return config.AuthVersionV1
-	}
-	return config.AuthVersionLegacyV0
 }
 
 func (p *ReverseProxy) outboundHTTPTransport(routed routedOutbound) *http.Transport {
@@ -103,6 +87,13 @@ func (p *ReverseProxy) outboundHTTPTransport(routed routedOutbound) *http.Transp
 		}
 	})
 	return p.transportPool.Get(routed.Route.NodeHash, routed.Outbound, p.metricsSink)
+}
+
+func (p *ReverseProxy) directHTTPTransport() *http.Transport {
+	p.directOnce.Do(func() {
+		p.directTransport = newDirectHTTPTransport(p.transportConfig, p.metricsSink)
+	})
+	return p.directTransport
 }
 
 // parsedPath holds the result of parsing a reverse proxy request path.
@@ -148,9 +139,6 @@ func stripForwardingIdentityHeaders(header http.Header) {
 }
 
 // decodePathSegmentV1 decodes one escaped URL path segment for V1 parsing.
-//
-// This function intentionally duplicates legacy decoding logic to keep V1 and
-// LEGACY_V0 parsing paths structurally independent.
 func decodePathSegmentV1(segment string) (string, *ProxyError) {
 	decoded, err := url.PathUnescape(segment)
 	if err != nil {
@@ -159,28 +147,8 @@ func decodePathSegmentV1(segment string) (string, *ProxyError) {
 	return decoded, nil
 }
 
-// decodePathSegmentLegacy decodes one escaped URL path segment for LEGACY_V0
-// parsing.
-//
-// This function intentionally duplicates V1 decoding logic so legacy code can
-// be removed without touching V1 parser implementations.
-func decodePathSegmentLegacy(segment string) (string, *ProxyError) {
-	decoded, err := url.PathUnescape(segment)
-	if err != nil {
-		return "", ErrURLParseError
-	}
-	return decoded, nil
-}
-
-// parsePath dispatches to a version-specific parser.
-//
-// New and legacy parsers intentionally remain isolated (including duplicated
-// parsing steps) so LEGACY_V0 can be removed cleanly without touching V1 code.
 func (p *ReverseProxy) parsePath(rawPath string) (*parsedPath, *ProxyError) {
-	if p.effectiveAuthVersion() == config.AuthVersionV1 {
-		return p.parsePathV1(rawPath)
-	}
-	return p.parsePathLegacy(rawPath)
+	return p.parsePathV1(rawPath)
 }
 
 // parsePathV1 parses reverse proxy path using V1 identity rules.
@@ -245,71 +213,6 @@ func (p *ReverseProxy) parsePathV1(rawPath string) (*parsedPath, *ProxyError) {
 	}, nil
 }
 
-// parsePathLegacy parses reverse proxy path using LEGACY_V0 identity rules.
-//
-// This parser is intentionally independent from V1 parser code, including
-// repeated parsing steps, to keep legacy removal low-risk.
-func (p *ReverseProxy) parsePathLegacy(rawPath string) (*parsedPath, *ProxyError) {
-	path := strings.TrimPrefix(rawPath, "/")
-	if path == "" {
-		return nil, ErrAuthFailed
-	}
-
-	segments := strings.SplitN(path, "/", 5) // token, identity, protocol, host, rest
-	token, perr := decodePathSegmentLegacy(segments[0])
-	if perr != nil {
-		return nil, perr
-	}
-	if p.token != "" && token != p.token {
-		return nil, ErrAuthFailed
-	}
-	if len(segments) < 4 {
-		return nil, ErrURLParseError
-	}
-
-	identity, perr := decodePathSegmentLegacy(segments[1])
-	if perr != nil {
-		return nil, perr
-	}
-	if !strings.Contains(identity, ":") {
-		return nil, ErrURLParseError
-	}
-	platName, account := parseLegacyPlatformAccountIdentity(identity)
-
-	protocolSeg, perr := decodePathSegmentLegacy(segments[2])
-	if perr != nil {
-		return nil, perr
-	}
-	protocol := strings.ToLower(protocolSeg)
-	if protocol != "http" && protocol != "https" {
-		return nil, ErrInvalidProtocol
-	}
-
-	host, perr := decodePathSegmentLegacy(segments[3])
-	if perr != nil {
-		return nil, perr
-	}
-	if host == "" {
-		return nil, ErrInvalidHost
-	}
-	if !isValidHost(host) {
-		return nil, ErrInvalidHost
-	}
-
-	remainingPath := ""
-	if len(segments) == 5 {
-		remainingPath = segments[4]
-	}
-
-	return &parsedPath{
-		PlatformName: platName,
-		Account:      account,
-		Protocol:     protocol,
-		Host:         host,
-		Path:         remainingPath,
-	}, nil
-}
-
 func buildReverseTargetURL(parsed *parsedPath, rawQuery string) (*url.URL, *ProxyError) {
 	targetURL := parsed.Protocol + "://" + parsed.Host
 	if parsed.Path != "" {
@@ -347,7 +250,7 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	lifecycle := newRequestLifecycle(p.events, r, ProxyTypeReverse, false)
 	lifecycle.setTarget(parsed.Host, "")
-	upstreamTrace := newUpstreamRequestTrace()
+	upstreamTrace := newUpstreamRequestTrace(lifecycle.markFirstByteReceived)
 	var pendingEgressHeaderBytes int64
 	var egressBodyCounter *countingReadCloser
 	var ingressBodyCounter *countingReadCloser
@@ -383,19 +286,6 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	routed, routeErr := resolveRoutedOutbound(p.router, p.pool, parsed.PlatformName, account, parsed.Host)
-	if routeErr != nil {
-		lifecycle.setProxyError(routeErr)
-		lifecycle.setHTTPStatus(routeErr.HTTPCode)
-		writeProxyError(w, routeErr)
-		return
-	}
-	lifecycle.setRouteResult(routed.Route)
-
-	nodeHashRaw := routed.Route.NodeHash
-	domain := netutil.ExtractDomain(parsed.Host)
-	go p.health.RecordLatency(nodeHashRaw, domain, nil)
-
 	target, targetErr := buildReverseTargetURL(parsed, r.URL.RawQuery)
 	if targetErr != nil {
 		lifecycle.setProxyError(targetErr)
@@ -405,7 +295,30 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	lifecycle.setTarget(parsed.Host, target.String())
 
-	transport := p.outboundHTTPTransport(routed)
+	var route routing.RouteResult
+	var hasRoute bool
+	var transport *http.Transport
+	var nodeHashRaw = route.NodeHash
+	domain := netutil.ExtractDomain(parsed.Host)
+	if p.bypass != nil && p.bypass.ShouldBypass(parsed.Host) {
+		transport = p.directHTTPTransport()
+	} else {
+		routed, routeErr := resolveRoutedOutbound(p.router, p.pool, parsed.PlatformName, account, parsed.Host)
+		if routeErr != nil {
+			lifecycle.setProxyError(routeErr)
+			lifecycle.setHTTPStatus(routeErr.HTTPCode)
+			writeProxyError(w, routeErr)
+			return
+		}
+		route = routed.Route
+		hasRoute = true
+		nodeHashRaw = route.NodeHash
+		lifecycle.setRouteResult(route)
+		if p.health != nil {
+			go p.health.RecordLatency(nodeHashRaw, domain, nil)
+		}
+		transport = p.outboundHTTPTransport(routed)
+	}
 
 	proxy := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
@@ -419,7 +332,7 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			reqCtx := httptrace.WithClientTrace(req.Context(), upstreamTrace.clientTrace())
 
 			// Add httptrace for TLS latency measurement on HTTPS.
-			if parsed.Protocol == "https" {
+			if parsed.Protocol == "https" && hasRoute && p.health != nil {
 				reporter := newReverseLatencyReporter(p.health, nodeHashRaw, domain)
 				reqCtx = httptrace.WithClientTrace(reqCtx, reporter.clientTrace())
 			}
@@ -439,7 +352,9 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			lifecycle.setUpstreamError("reverse_roundtrip", err)
 			lifecycle.setNetOK(false)
 			lifecycle.setHTTPStatus(proxyErr.HTTPCode)
-			go p.health.RecordResult(nodeHashRaw, false)
+			if hasRoute {
+				recordPassiveResultAsync(p.health, route, false)
+			}
 			writeProxyError(rw, proxyErr)
 		},
 		ModifyResponse: func(resp *http.Response) error {
@@ -462,7 +377,9 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					lifecycle.setRespHeadersCaptured(respHeaders, respHeadersLen, respHeadersTruncated)
 				}
 				lifecycle.setNetOK(true)
-				go p.health.RecordResult(nodeHashRaw, true)
+				if hasRoute {
+					recordPassiveResultAsync(p.health, route, true)
+				}
 				return nil
 			}
 			if resp.Body != nil && resp.Body != http.NoBody {
@@ -486,7 +403,9 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// (client abort vs upstream reset vs network blip), and the added
 			// complexity is not worth it for the current phase.
 			lifecycle.setNetOK(true)
-			go p.health.RecordResult(nodeHashRaw, true)
+			if hasRoute {
+				recordPassiveResultAsync(p.health, route, true)
+			}
 			return nil
 		},
 	}

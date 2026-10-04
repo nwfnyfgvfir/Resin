@@ -3,6 +3,7 @@ package subscription
 import (
 	"encoding/base64"
 	"encoding/json"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -1222,6 +1223,37 @@ func TestParseGeneralSubscription_SSDURI(t *testing.T) {
 	}
 }
 
+func TestParseGeneralSubscription_SSDURIWithSimpleObfsAlias(t *testing.T) {
+	ssd := `{
+		"airport":"SSD-Airport",
+		"port":8388,
+		"encryption":"aes-128-gcm",
+		"password":"default-pass",
+		"plugin":"simple-obfs",
+		"plugin_options":"mode=http;host=obfs.example.com",
+		"servers":[
+			{"server":"1.1.1.1","remarks":"ssd-obfs"}
+		]
+	}`
+	data := []byte("ssd://" + base64.StdEncoding.EncodeToString([]byte(ssd)))
+
+	nodes, err := ParseGeneralSubscription(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 1 {
+		t.Fatalf("expected 1 parsed node, got %d", len(nodes))
+	}
+
+	obj := parseNodeRaw(t, nodes[0].RawOptions)
+	if got := obj["plugin"]; got != "obfs-local" {
+		t.Fatalf("plugin: got %v", got)
+	}
+	if got := obj["plugin_opts"]; got != "obfs=http;obfs-host=obfs.example.com" {
+		t.Fatalf("plugin_opts: got %v", got)
+	}
+}
+
 func TestParseGeneralSubscription_SurgeProxySection(t *testing.T) {
 	data := []byte(`
 [General]
@@ -1838,6 +1870,139 @@ func TestParseGeneralSubscription_SSURIWithPluginOptionsUnescapedSemicolons(t *t
 	}
 }
 
+func TestParseGeneralSubscription_SSURIWithSimpleObfsAlias(t *testing.T) {
+	data := []byte(
+		"ss://YWVzLTEyOC1nY206cGFzcw==@1.1.1.1:8388?plugin=simple-obfs%3Bobfs%3Dhttp%3Bobfs-host%3Dobfs.example.com#ss-simple-obfs",
+	)
+
+	nodes, err := ParseGeneralSubscription(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 1 {
+		t.Fatalf("expected 1 parsed node, got %d", len(nodes))
+	}
+
+	obj := parseNodeRaw(t, nodes[0].RawOptions)
+	if got := obj["plugin"]; got != "obfs-local" {
+		t.Fatalf("plugin: got %v", got)
+	}
+	if got := obj["plugin_opts"]; got != "obfs=http;obfs-host=obfs.example.com" {
+		t.Fatalf("plugin_opts: got %v", got)
+	}
+}
+
+func TestParseGeneralSubscription_SSURIWithSeparatedSimpleObfsAliasOptions(t *testing.T) {
+	data := []byte(
+		"ss://YWVzLTEyOC1nY206cGFzcw==@1.1.1.1:8388?plugin=simple-obfs&plugin-opts=obfs-local%3Bmode%3Dhttp%3Bhost%3Dobfs.example.com#ss-simple-obfs-separated",
+	)
+
+	nodes, err := ParseGeneralSubscription(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 1 {
+		t.Fatalf("expected 1 parsed node, got %d", len(nodes))
+	}
+
+	obj := parseNodeRaw(t, nodes[0].RawOptions)
+	if got := obj["plugin"]; got != "obfs-local" {
+		t.Fatalf("plugin: got %v", got)
+	}
+	if got := obj["plugin_opts"]; got != "obfs=http;obfs-host=obfs.example.com" {
+		t.Fatalf("plugin_opts: got %v", got)
+	}
+}
+
+func TestParseGeneralSubscription_SSURIWithSimpleObfsEscapedOptions(t *testing.T) {
+	plugin := url.QueryEscape(`simple-obfs;obfs=http;obfs-host=edge\;host.example.com;path=/a\=b`)
+	data := []byte("ss://YWVzLTEyOC1nY206cGFzcw==@1.1.1.1:8388?plugin=" + plugin + "#ss-simple-obfs-escaped")
+
+	nodes, err := ParseGeneralSubscription(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 1 {
+		t.Fatalf("expected 1 parsed node, got %d", len(nodes))
+	}
+
+	obj := parseNodeRaw(t, nodes[0].RawOptions)
+	if got := obj["plugin"]; got != "obfs-local" {
+		t.Fatalf("plugin: got %v", got)
+	}
+	if got := obj["plugin_opts"]; got != `obfs=http;obfs-host=edge\;host.example.com;path=/a\=b` {
+		t.Fatalf("plugin_opts: got %v", got)
+	}
+}
+
+func TestParseGeneralSubscription_ClashSSWithObfsPluginAlias(t *testing.T) {
+	data := []byte(`{
+		"proxies": [{
+			"name": "tag-lax",
+			"type": "ss",
+			"server": "1.1.1.1",
+			"port": 8388,
+			"cipher": "aes-128-gcm",
+			"password": "pass",
+			"plugin": "obfs",
+			"plugin-opts": {
+				"mode": "http",
+				"host": "obfs.example.com"
+			}
+		}]
+	}`)
+
+	nodes, err := ParseGeneralSubscription(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 1 {
+		t.Fatalf("expected 1 parsed node, got %d", len(nodes))
+	}
+
+	obj := parseNodeRaw(t, nodes[0].RawOptions)
+	if got := obj["plugin"]; got != "obfs-local" {
+		t.Fatalf("plugin: got %v", got)
+	}
+	if got := obj["plugin_opts"]; got != "obfs=http;obfs-host=obfs.example.com" {
+		t.Fatalf("plugin_opts: got %v", got)
+	}
+}
+
+func TestParseGeneralSubscription_ClashSSWithObfsLocalModeHostOptions(t *testing.T) {
+	data := []byte(`{
+		"proxies": [{
+			"name": "tag-lax",
+			"type": "ss",
+			"server": "1.1.1.1",
+			"port": 8388,
+			"cipher": "aes-128-gcm",
+			"password": "pass",
+			"plugin": "obfs-local",
+			"plugin-opts": {
+				"mode": "http",
+				"host": "obfs.example.com"
+			}
+		}]
+	}`)
+
+	nodes, err := ParseGeneralSubscription(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 1 {
+		t.Fatalf("expected 1 parsed node, got %d", len(nodes))
+	}
+
+	obj := parseNodeRaw(t, nodes[0].RawOptions)
+	if got := obj["plugin"]; got != "obfs-local" {
+		t.Fatalf("plugin: got %v", got)
+	}
+	if got := obj["plugin_opts"]; got != "obfs=http;obfs-host=obfs.example.com" {
+		t.Fatalf("plugin_opts: got %v", got)
+	}
+}
+
 func TestParseGeneralSubscription_SSURIDefaultTagUsesEndpoint(t *testing.T) {
 	nodes, err := ParseGeneralSubscription([]byte("ss://YWVzLTEyOC1nY206cGFzcw==@1.1.1.1:8388"))
 	if err != nil {
@@ -2234,6 +2399,37 @@ socks5h://user-s5h:pass-s5h@proxy.example.net:1082#SOCKS5H%20Node
 	}
 }
 
+func TestParseGeneralSubscription_ProxyURIDefaultTagsDistinguishHTTPS(t *testing.T) {
+	data := []byte(`
+http://1.2.3.4:8080
+https://example.com:8443
+`)
+
+	nodes, err := ParseGeneralSubscription(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 2 {
+		t.Fatalf("expected 2 parsed nodes, got %d", len(nodes))
+	}
+
+	httpNode := parseNodeRaw(t, nodes[0].RawOptions)
+	httpsNode := parseNodeRaw(t, nodes[1].RawOptions)
+	if got := httpNode["tag"]; got != "http-1.2.3.4:8080" {
+		t.Fatalf("expected HTTP default tag, got %v", got)
+	}
+	if got := httpsNode["tag"]; got != "https-example.com:8443" {
+		t.Fatalf("expected HTTPS default tag, got %v", got)
+	}
+	if got := httpsNode["type"]; got != "http" {
+		t.Fatalf("expected HTTPS proxy outbound type http, got %v", got)
+	}
+	tls, ok := httpsNode["tls"].(map[string]any)
+	if !ok || tls["enabled"] != true {
+		t.Fatalf("expected HTTPS proxy TLS enabled, got %v", httpsNode["tls"])
+	}
+}
+
 func TestParseGeneralSubscription_ProxyURILinesRejectNonProxyURLs(t *testing.T) {
 	tests := []string{
 		"https://api.example.com",
@@ -2596,6 +2792,27 @@ func TestParseGeneralSubscription_NetchURI_SS(t *testing.T) {
 	}
 	if got := obj["method"]; got != "chacha20-ietf-poly1305" {
 		t.Fatalf("method: got %v", got)
+	}
+}
+
+func TestParseGeneralSubscription_NetchURI_SSWithObfsAlias(t *testing.T) {
+	payload := `{"Type":"SS","Remark":"Netch SS Obfs","Hostname":"1.1.1.1","Port":8388,"EncryptMethod":"AEAD_CHACHA20_POLY1305","Password":"pass","Plugin":"simple-obfs","PluginOption":"mode=http;host=obfs.example.com"}`
+	data := []byte("Netch://" + base64.StdEncoding.EncodeToString([]byte(payload)))
+
+	nodes, err := ParseGeneralSubscription(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 1 {
+		t.Fatalf("expected 1 parsed node, got %d", len(nodes))
+	}
+
+	obj := parseNodeRaw(t, nodes[0].RawOptions)
+	if got := obj["plugin"]; got != "obfs-local" {
+		t.Fatalf("plugin: got %v", got)
+	}
+	if got := obj["plugin_opts"]; got != "obfs=http;obfs-host=obfs.example.com" {
+		t.Fatalf("plugin_opts: got %v", got)
 	}
 }
 

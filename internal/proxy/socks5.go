@@ -3,628 +3,412 @@ package proxy
 import (
 	"bufio"
 	"context"
-	"errors"
-	"fmt"
+	"encoding/binary"
 	"io"
 	"net"
-	"strings"
+	"strconv"
+	"sync"
 	"time"
 
-	"github.com/Resinat/Resin/internal/config"
-	"github.com/Resinat/Resin/internal/netutil"
 	"github.com/Resinat/Resin/internal/outbound"
 	"github.com/Resinat/Resin/internal/routing"
-	"github.com/sagernet/sing/common/buf"
-	singbufio "github.com/sagernet/sing/common/bufio"
-	M "github.com/sagernet/sing/common/metadata"
-	N "github.com/sagernet/sing/common/network"
-	"github.com/sagernet/sing/common/varbin"
-	"github.com/sagernet/sing/protocol/socks/socks5"
 )
 
-// Socks5ProxyConfig holds dependencies for the SOCKS5 inbound proxy.
-type Socks5ProxyConfig struct {
-	ProxyToken        string
-	AuthVersion       string
-	DeploymentProfile config.DeploymentProfile
-	AdvertiseHost     string
-	ListenAddress     string
-	ListenPort        int
-	Router            *routing.Router
-	Pool              outbound.PoolAccessor
-	Health            HealthRecorder
-	Events            EventEmitter
-	MetricsSink       MetricsEventSink
+const (
+	socks5Version                 = 0x05
+	socks5MethodNoAuth            = 0x00
+	socks5MethodUserPass          = 0x02
+	socks5MethodNoAcceptable      = 0xFF
+	socks5CommandConnect          = 0x01
+	socks5AddressTypeIPv4         = 0x01
+	socks5AddressTypeDomain       = 0x03
+	socks5AddressTypeIPv6         = 0x04
+	socks5ReplySucceeded          = 0x00
+	socks5ReplyGeneralFailure     = 0x01
+	socks5ReplyCommandUnsupported = 0x07
+	socks5ReplyAddressUnsupported = 0x08
+	socks5UserPassVersion         = 0x01
+	socks5UserPassStatusSuccess   = 0x00
+	socks5UserPassStatusFailure   = 0x01
+)
+
+var socks5HandshakeTimeout = 15 * time.Second
+
+// Socks5InboundConfig holds dependencies for the SOCKS5 inbound handler.
+type Socks5InboundConfig struct {
+	ProxyToken       string
+	Router           *routing.Router
+	Pool             outbound.PoolAccessor
+	Health           HealthRecorder
+	Events           EventEmitter
+	MetricsSink      MetricsEventSink
+	ProxyBypassRules []string
 }
 
-// Socks5Proxy implements a SOCKS5 inbound supporting CONNECT everywhere and
-// UDP ASSOCIATE only when the deployment profile allows it.
-type Socks5Proxy struct {
-	token             string
-	authVersion       config.AuthVersion
-	deploymentProfile config.DeploymentProfile
-	advertiseHost     string
-	listenAddress     string
-	listenPort        int
-	router            *routing.Router
-	pool              outbound.PoolAccessor
-	health            HealthRecorder
-	events            EventEmitter
-	metricsSink       MetricsEventSink
+// Socks5Inbound implements SOCKS5 CONNECT over a raw TCP connection.
+type Socks5Inbound struct {
+	token  string
+	tunnel tunnelDeps
+	events EventEmitter
 }
 
-func NewSocks5Proxy(cfg Socks5ProxyConfig) *Socks5Proxy {
+type socks5HandshakeResult struct {
+	platformName string
+	account      string
+	target       string
+	ok           bool
+}
+
+// NewSocks5Inbound creates a new SOCKS5 inbound handler.
+func NewSocks5Inbound(cfg Socks5InboundConfig) *Socks5Inbound {
 	ev := cfg.Events
 	if ev == nil {
 		ev = NoOpEventEmitter{}
 	}
-	authVersion := config.NormalizeAuthVersion(cfg.AuthVersion)
-	if authVersion == "" {
-		authVersion = config.AuthVersionLegacyV0
-	}
-	profile := cfg.DeploymentProfile
-	if profile == "" {
-		profile = config.DeploymentProfileStandard
-	}
-	return &Socks5Proxy{
-		token:             cfg.ProxyToken,
-		authVersion:       authVersion,
-		deploymentProfile: profile,
-		advertiseHost:     strings.TrimSpace(cfg.AdvertiseHost),
-		listenAddress:     strings.TrimSpace(cfg.ListenAddress),
-		listenPort:        cfg.ListenPort,
-		router:            cfg.Router,
-		pool:              cfg.Pool,
-		health:            cfg.Health,
-		events:            ev,
-		metricsSink:       cfg.MetricsSink,
+	return &Socks5Inbound{
+		token: cfg.ProxyToken,
+		tunnel: tunnelDeps{
+			router:      cfg.Router,
+			pool:        cfg.Pool,
+			health:      cfg.Health,
+			metricsSink: cfg.MetricsSink,
+			bypass:      NewTargetBypassMatcher(cfg.ProxyBypassRules),
+		},
+		events: ev,
 	}
 }
 
-func (p *Socks5Proxy) Serve(ln net.Listener) error {
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			return err
-		}
-		go p.serveConn(conn)
+// ServeConn handles a SOCKS5 session on an already-accepted TCP connection.
+func (s *Socks5Inbound) ServeConn(conn net.Conn) {
+	s.ServeConnContext(context.Background(), conn)
+}
+
+// ServeConnContext handles a SOCKS5 session with a caller-provided base context.
+func (s *Socks5Inbound) ServeConnContext(baseCtx context.Context, conn net.Conn) {
+	if conn == nil {
+		return
 	}
-}
-
-func (p *Socks5Proxy) ServeConn(conn net.Conn) {
-	p.serveConn(conn)
-}
-
-func (p *Socks5Proxy) serveConn(conn net.Conn) {
 	defer conn.Close()
-
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
 	reader := bufio.NewReader(conn)
-	authResult, err := p.handshake(conn, reader)
-	if err != nil {
+
+	handshakeCtx, cancelHandshake := context.WithTimeout(baseCtx, socks5HandshakeTimeout)
+	defer cancelHandshake()
+	handshakePhase := startSocks5HandshakePhase(handshakeCtx, conn)
+	defer handshakePhase.Stop()
+
+	requireAuthInfo := InboundPolicyFromContext(baseCtx).RequireProxyAuthInfo && s.token == ""
+	handshake := s.performHandshake(conn, reader, requireAuthInfo)
+	if !handshake.ok {
 		return
 	}
+	handshakePhase.Stop()
 
-	req, err := socks5.ReadRequest(varbin.StubReader(reader))
-	if err != nil {
-		return
+	lifecycle := newRequestLifecycleFromMetadata(
+		s.events,
+		conn.RemoteAddr().String(),
+		"",
+		ProxyTypeSocks5Forward,
+		true,
+	)
+	lifecycle.setTarget(handshake.target, "")
+	lifecycle.setAccount(handshake.account)
+	defer lifecycle.finish()
+
+	prepare := prepareConnectTunnel(
+		baseCtx,
+		s.tunnel,
+		handshake.platformName,
+		handshake.account,
+		handshake.target,
+	)
+	if prepare.route.PlatformID != "" {
+		lifecycle.setRouteResult(prepare.route)
 	}
-	switch req.Command {
-	case socks5.CommandConnect:
-		p.handleConnectConn(conn, reader, req, authResult)
-	case socks5.CommandUDPAssociate:
-		p.handleUDPAssociateConn(conn, req, authResult)
-	default:
-		_ = socks5.WriteResponse(conn, socks5.Response{ReplyCode: socks5.ReplyCodeUnsupported})
-	}
-}
-
-type socks5AuthResult struct {
-	platformName string
-	account      string
-}
-
-func (p *Socks5Proxy) handshake(conn net.Conn, reader *bufio.Reader) (socks5AuthResult, error) {
-	authReq, err := socks5.ReadAuthRequest(varbin.StubReader(reader))
-	if err != nil {
-		return socks5AuthResult{}, err
-	}
-
-	method := socks5.AuthTypeNoAcceptedMethods
-	if p.token == "" {
-		for _, candidate := range authReq.Methods {
-			if candidate == socks5.AuthTypeUsernamePassword {
-				method = socks5.AuthTypeUsernamePassword
-				break
+	if prepare.session == nil {
+		if prepare.proxyErr != nil {
+			lifecycle.setProxyError(prepare.proxyErr)
+			if prepare.upstreamStage != "" {
+				lifecycle.setUpstreamError(prepare.upstreamStage, prepare.upstreamErr)
 			}
+			lifecycle.setNetOK(false)
+			_ = writeSocks5Reply(conn, socks5ReplyGeneralFailure, nil)
+		} else if prepare.canceled {
+			lifecycle.setNetOK(true)
 		}
-		if method == socks5.AuthTypeNoAcceptedMethods {
-			for _, candidate := range authReq.Methods {
-				if candidate == socks5.AuthTypeNotRequired {
-					method = socks5.AuthTypeNotRequired
-					break
-				}
-			}
+		return
+	}
+
+	if err := writeSocks5Reply(conn, socks5ReplySucceeded, prepare.session.upstreamConn.LocalAddr()); err != nil {
+		prepare.session.upstreamConn.Close()
+		lifecycle.setProxyError(ErrUpstreamRequestFailed)
+		lifecycle.setUpstreamError("socks5_connect_response_write", err)
+		lifecycle.setNetOK(false)
+		return
+	}
+
+	relay := pumpPreparedTunnel(conn, reader, prepare.session, tunnelPumpOptions{
+		onFirstIngressByte: lifecycle.markFirstByteReceived,
+	})
+	lifecycle.addIngressBytes(relay.ingressBytes)
+	lifecycle.addEgressBytes(relay.egressBytes)
+	if relay.proxyErr != nil {
+		lifecycle.setProxyError(relay.proxyErr)
+		lifecycle.setUpstreamError(relay.upstreamStage, relay.upstreamErr)
+	}
+	lifecycle.setNetOK(relay.netOK)
+	prepare.session.recordResult(relay.netOK)
+}
+
+func (s *Socks5Inbound) performHandshake(conn net.Conn, reader *bufio.Reader, requireAuthInfo bool) socks5HandshakeResult {
+	method, ok := s.negotiateMethod(conn, reader, requireAuthInfo)
+	if !ok {
+		return socks5HandshakeResult{}
+	}
+
+	result := socks5HandshakeResult{ok: true}
+	if method == socks5MethodUserPass {
+		var authOK bool
+		result.platformName, result.account, authOK = s.authenticateUserPass(conn, reader, requireAuthInfo)
+		if !authOK {
+			return socks5HandshakeResult{}
+		}
+	}
+
+	target, replyCode, ok := readSocks5ConnectRequest(reader)
+	if !ok {
+		if replyCode != 0 {
+			_ = writeSocks5Reply(conn, replyCode, nil)
+		}
+		return socks5HandshakeResult{}
+	}
+
+	result.target = target
+	return result
+}
+
+type socks5HandshakePhase struct {
+	conn     net.Conn
+	stopCh   chan struct{}
+	done     chan struct{}
+	stopOnce sync.Once
+}
+
+func startSocks5HandshakePhase(baseCtx context.Context, conn net.Conn) *socks5HandshakePhase {
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	phase := &socks5HandshakePhase{
+		conn:   conn,
+		stopCh: make(chan struct{}),
+		done:   make(chan struct{}),
+	}
+	go phase.run(baseCtx)
+	return phase
+}
+
+func (p *socks5HandshakePhase) run(baseCtx context.Context) {
+	defer close(p.done)
+	if p == nil || p.conn == nil {
+		return
+	}
+
+	select {
+	case <-p.stopCh:
+		return
+	case <-baseCtx.Done():
+		// Interrupt any blocking handshake read/write. The handler clears these
+		// deadlines before transitioning into the long-lived tunnel phase.
+		_ = p.conn.SetReadDeadline(time.Now())
+		_ = p.conn.SetWriteDeadline(time.Now())
+	}
+}
+
+func (p *socks5HandshakePhase) Stop() {
+	if p == nil {
+		return
+	}
+	p.stopOnce.Do(func() {
+		if p.stopCh != nil {
+			close(p.stopCh)
+		}
+		if p.done != nil {
+			<-p.done
+		}
+		if p.conn != nil {
+			_ = p.conn.SetReadDeadline(time.Time{})
+			_ = p.conn.SetWriteDeadline(time.Time{})
+		}
+	})
+}
+
+func (s *Socks5Inbound) negotiateMethod(conn net.Conn, reader *bufio.Reader, requireAuthInfo bool) (byte, bool) {
+	header := make([]byte, 2)
+	if _, err := io.ReadFull(reader, header); err != nil {
+		return 0, false
+	}
+	if header[0] != socks5Version {
+		return 0, false
+	}
+	methods := make([]byte, int(header[1]))
+	if _, err := io.ReadFull(reader, methods); err != nil {
+		return 0, false
+	}
+
+	selected := byte(socks5MethodNoAcceptable)
+	if s.token != "" || requireAuthInfo {
+		if containsSocks5Method(methods, socks5MethodUserPass) {
+			selected = socks5MethodUserPass
 		}
 	} else {
-		for _, candidate := range authReq.Methods {
-			if candidate == socks5.AuthTypeUsernamePassword {
-				method = socks5.AuthTypeUsernamePassword
-				break
-			}
-		}
-	}
-	if err := socks5.WriteAuthResponse(conn, socks5.AuthResponse{Method: method}); err != nil {
-		return socks5AuthResult{}, err
-	}
-	if method == socks5.AuthTypeNoAcceptedMethods {
-		return socks5AuthResult{}, errors.New("socks5: no accepted auth methods")
-	}
-	if method != socks5.AuthTypeUsernamePassword {
-		return socks5AuthResult{}, nil
-	}
-
-	creds, err := socks5.ReadUsernamePasswordAuthRequest(varbin.StubReader(reader))
-	if err != nil {
-		return socks5AuthResult{}, err
-	}
-	authResult, ok := p.authenticateCredentials(creds.Username, creds.Password)
-	if !ok {
-		_ = socks5.WriteUsernamePasswordAuthResponse(conn, socks5.UsernamePasswordAuthResponse{Status: socks5.UsernamePasswordStatusFailure})
-		return socks5AuthResult{}, errors.New("socks5: authentication failed")
-	}
-	if err := socks5.WriteUsernamePasswordAuthResponse(conn, socks5.UsernamePasswordAuthResponse{Status: socks5.UsernamePasswordStatusSuccess}); err != nil {
-		return socks5AuthResult{}, err
-	}
-	return authResult, nil
-}
-
-func (p *Socks5Proxy) authenticateCredentials(username, password string) (socks5AuthResult, bool) {
-	identityPlatform, identityAccount := p.credentialIdentity(username)
-	if p.token == "" {
-		return socks5AuthResult{platformName: identityPlatform, account: identityAccount}, true
-	}
-	if password != p.token {
-		return socks5AuthResult{}, false
-	}
-	return socks5AuthResult{platformName: identityPlatform, account: identityAccount}, true
-}
-
-func (p *Socks5Proxy) credentialIdentity(username string) (string, string) {
-	if p.authVersion == config.AuthVersionV1 {
-		if p.token == "" {
-			return parseForwardCredentialV1WhenAuthDisabled(username)
-		}
-		return parseV1PlatformAccountIdentity(username)
-	}
-	if p.token == "" {
-		return parseLegacyAuthDisabledIdentityCredential(username)
-	}
-	return parseLegacyPlatformAccountIdentity(username)
-}
-
-func (p *Socks5Proxy) handleConnectConn(conn net.Conn, reader *bufio.Reader, req socks5.Request, authResult socks5AuthResult) {
-	platformName, account := authResult.platformName, authResult.account
-	lifecycle := newRequestLifecycleFromFields(p.events, ProxyTypeSocks5, true, "SOCKS_CONNECT", remoteIPString(conn.RemoteAddr()))
-	lifecycle.setTarget(req.Destination.String(), "")
-	lifecycle.setAccount(account)
-	defer lifecycle.finish()
-
-	routed, routeErr := resolveRoutedOutbound(p.router, p.pool, platformName, account, req.Destination.String())
-	if routeErr != nil {
-		lifecycle.setProxyError(routeErr)
-		lifecycle.setHTTPStatus(routeErr.HTTPCode)
-		lifecycle.setUpstreamError("socks5_route", errors.New(routeErr.ResinError))
-		_ = socks5.WriteResponse(conn, socks5.Response{ReplyCode: socksReplyCodeForProxyError(routeErr), Bind: p.bindAddress()})
-		return
-	}
-	lifecycle.setRouteResult(routed.Route)
-	domain := netutil.ExtractDomain(req.Destination.String())
-	nodeHash := routed.Route.NodeHash
-	go p.health.RecordLatency(nodeHash, domain, nil)
-
-	rawConn, err := routed.Outbound.DialContext(context.Background(), "tcp", req.Destination)
-	if err != nil {
-		proxyErr := classifyConnectError(err)
-		if proxyErr != nil {
-			lifecycle.setProxyError(proxyErr)
-			lifecycle.setHTTPStatus(proxyErr.HTTPCode)
-			lifecycle.setUpstreamError("socks5_connect_dial", err)
-			go p.health.RecordResult(nodeHash, false)
-			_ = socks5.WriteResponse(conn, socks5.Response{ReplyCode: socksReplyCodeForError(err, proxyErr), Bind: p.bindAddress()})
-		}
-		return
-	}
-	recordResult := func(ok bool) {
-		lifecycle.setNetOK(ok)
-		go p.health.RecordResult(nodeHash, ok)
-	}
-
-	var upstreamBase net.Conn = rawConn
-	if p.metricsSink != nil {
-		p.metricsSink.OnConnectionLifecycle(ConnectionOutbound, ConnectionOpen)
-		upstreamBase = newCountingConn(rawConn, p.metricsSink)
-	}
-	upstreamConn := newTLSLatencyConn(upstreamBase, func(latency time.Duration) {
-		p.health.RecordLatency(nodeHash, domain, &latency)
-	})
-
-	if err := socks5.WriteResponse(conn, socks5.Response{ReplyCode: socks5.ReplyCodeSuccess, Bind: p.bindAddress()}); err != nil {
-		lifecycle.setProxyError(ErrUpstreamRequestFailed)
-		lifecycle.setHTTPStatus(ErrUpstreamRequestFailed.HTTPCode)
-		lifecycle.setUpstreamError("socks5_connect_response_write", err)
-		recordResult(false)
-		return
-	}
-
-	clientToUpstream, err := makeTunnelClientReader(conn, reader)
-	if err != nil {
-		lifecycle.setProxyError(ErrUpstreamRequestFailed)
-		lifecycle.setHTTPStatus(ErrUpstreamRequestFailed.HTTPCode)
-		lifecycle.setUpstreamError("socks5_connect_prefetch_drain", err)
-		recordResult(false)
-		return
-	}
-
-	type copyResult struct {
-		n   int64
-		err error
-	}
-	egressBytesCh := make(chan copyResult, 1)
-	go func() {
-		defer upstreamConn.Close()
-		defer conn.Close()
-		n, copyErr := io.Copy(upstreamConn, clientToUpstream)
-		egressBytesCh <- copyResult{n: n, err: copyErr}
-	}()
-	ingressBytes, ingressCopyErr := io.Copy(conn, upstreamConn)
-	lifecycle.addIngressBytes(ingressBytes)
-	_ = conn.Close()
-	_ = upstreamConn.Close()
-	egressResult := <-egressBytesCh
-	lifecycle.addEgressBytes(egressResult.n)
-
-	okResult := ingressBytes > 0 && egressResult.n > 0
-	if !okResult {
-		lifecycle.setProxyError(ErrUpstreamRequestFailed)
-		lifecycle.setHTTPStatus(ErrUpstreamRequestFailed.HTTPCode)
 		switch {
-		case !isBenignTunnelCopyError(ingressCopyErr):
-			lifecycle.setUpstreamError("socks5_connect_upstream_to_client_copy", ingressCopyErr)
-		case !isBenignTunnelCopyError(egressResult.err):
-			lifecycle.setUpstreamError("socks5_connect_client_to_upstream_copy", egressResult.err)
-		default:
-			switch {
-			case ingressBytes == 0 && egressResult.n == 0:
-				lifecycle.setUpstreamError("socks5_connect_zero_traffic", nil)
-			case ingressBytes == 0:
-				lifecycle.setUpstreamError("socks5_connect_no_ingress_traffic", nil)
-			default:
-				lifecycle.setUpstreamError("socks5_connect_no_egress_traffic", nil)
-			}
+		case containsSocks5Method(methods, socks5MethodUserPass):
+			selected = socks5MethodUserPass
+		case containsSocks5Method(methods, socks5MethodNoAuth):
+			selected = socks5MethodNoAuth
 		}
 	}
-	recordResult(okResult)
+
+	if _, err := conn.Write([]byte{socks5Version, selected}); err != nil {
+		return 0, false
+	}
+	if selected == socks5MethodNoAcceptable {
+		return 0, false
+	}
+	return selected, true
 }
 
-func (p *Socks5Proxy) handleUDPAssociateConn(conn net.Conn, req socks5.Request, authResult socks5AuthResult) {
-	platformName, account := authResult.platformName, authResult.account
-	lifecycle := newRequestLifecycleFromFields(p.events, ProxyTypeSocks5, true, "SOCKS_UDP_ASSOCIATE", remoteIPString(conn.RemoteAddr()))
-	lifecycle.setTarget(req.Destination.String(), "")
-	lifecycle.setAccount(account)
-	defer lifecycle.finish()
-
-	if !p.deploymentProfile.AllowsSocks5UDP() {
-		lifecycle.setProxyError(ErrUpstreamRequestFailed)
-		lifecycle.setHTTPStatus(ErrUpstreamRequestFailed.HTTPCode)
-		lifecycle.setUpstreamError("socks5_udp_disabled", nil)
-		_ = socks5.WriteResponse(conn, socks5.Response{ReplyCode: socks5.ReplyCodeNotAllowed, Bind: p.bindAddress()})
-		return
+func (s *Socks5Inbound) authenticateUserPass(conn net.Conn, reader *bufio.Reader, requireAuthInfo bool) (string, string, bool) {
+	header := make([]byte, 2)
+	if _, err := io.ReadFull(reader, header); err != nil {
+		return "", "", false
+	}
+	if header[0] != socks5UserPassVersion {
+		_, _ = conn.Write([]byte{socks5UserPassVersion, socks5UserPassStatusFailure})
+		return "", "", false
 	}
 
-	routed, routeErr := resolveRoutedOutbound(p.router, p.pool, platformName, account, req.Destination.String())
-	if routeErr != nil {
-		lifecycle.setProxyError(routeErr)
-		lifecycle.setHTTPStatus(routeErr.HTTPCode)
-		lifecycle.setUpstreamError("socks5_udp_route", errors.New(routeErr.ResinError))
-		_ = socks5.WriteResponse(conn, socks5.Response{ReplyCode: socksReplyCodeForProxyError(routeErr), Bind: p.bindAddress()})
-		return
-	}
-	lifecycle.setRouteResult(routed.Route)
-	nodeHash := routed.Route.NodeHash
-	go p.health.RecordLatency(nodeHash, netutil.ExtractDomain(req.Destination.String()), nil)
-
-	var listenDestination M.Socksaddr
-	if req.Destination.IsValid() {
-		listenDestination = req.Destination
-		if listenDestination.Fqdn != "" {
-			listenDestination = M.Socksaddr{}
-		}
-	}
-	packetConn, err := routed.Outbound.ListenPacket(context.Background(), listenDestination)
-	if err != nil {
-		proxyErr := classifyUpstreamError(err)
-		if proxyErr == nil {
-			proxyErr = ErrUpstreamRequestFailed
-		}
-		lifecycle.setProxyError(proxyErr)
-		lifecycle.setHTTPStatus(proxyErr.HTTPCode)
-		lifecycle.setUpstreamError("socks5_udp_listen_packet", err)
-		go p.health.RecordResult(nodeHash, false)
-		_ = socks5.WriteResponse(conn, socks5.Response{ReplyCode: socksReplyCodeForError(err, proxyErr), Bind: p.bindAddress()})
-		return
-	}
-	defer packetConn.Close()
-
-	udpListener, err := net.ListenPacket("udp", net.JoinHostPort(p.bindAdvertiseHost(), "0"))
-	if err != nil {
-		lifecycle.setProxyError(ErrInternalError)
-		lifecycle.setHTTPStatus(ErrInternalError.HTTPCode)
-		lifecycle.setUpstreamError("socks5_udp_listen", err)
-		go p.health.RecordResult(nodeHash, false)
-		_ = socks5.WriteResponse(conn, socks5.Response{ReplyCode: socks5.ReplyCodeFailure, Bind: p.bindAddress()})
-		return
-	}
-	defer udpListener.Close()
-
-	associateAddr, ok := udpListener.LocalAddr().(*net.UDPAddr)
-	if !ok {
-		lifecycle.setProxyError(ErrInternalError)
-		lifecycle.setHTTPStatus(ErrInternalError.HTTPCode)
-		lifecycle.setUpstreamError("socks5_udp_local_addr", nil)
-		go p.health.RecordResult(nodeHash, false)
-		_ = socks5.WriteResponse(conn, socks5.Response{ReplyCode: socks5.ReplyCodeFailure, Bind: p.bindAddress()})
-		return
-	}
-	bindAddr := M.ParseSocksaddr(net.JoinHostPort(p.bindAdvertiseHost(), fmt.Sprintf("%d", associateAddr.Port)))
-	if err := socks5.WriteResponse(conn, socks5.Response{ReplyCode: socks5.ReplyCodeSuccess, Bind: bindAddr}); err != nil {
-		lifecycle.setProxyError(ErrUpstreamRequestFailed)
-		lifecycle.setHTTPStatus(ErrUpstreamRequestFailed.HTTPCode)
-		lifecycle.setUpstreamError("socks5_udp_response_write", err)
-		go p.health.RecordResult(nodeHash, false)
-		return
+	username := make([]byte, int(header[1]))
+	if _, err := io.ReadFull(reader, username); err != nil {
+		return "", "", false
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	tcpDone := make(chan error, 1)
-	go func() {
-		_, err := io.Copy(io.Discard, conn)
-		tcpDone <- err
-	}()
-
-	clientPacketConn := singbufio.NewPacketConn(udpListener)
-	upstreamPacketConn := singbufio.NewPacketConn(packetConn)
-	allowedClientIP := remoteIPString(conn.RemoteAddr())
-	type udpCopyResult struct {
-		n   int64
-		err error
+	plen := []byte{0}
+	if _, err := io.ReadFull(reader, plen); err != nil {
+		return "", "", false
 	}
-	clientToUpstreamCh := make(chan udpCopyResult, 1)
-	upstreamToClientCh := make(chan udpCopyResult, 1)
-
-	go func() {
-		clientToUpstreamCh <- p.copySocks5UDPClientToUpstream(ctx, clientPacketConn, upstreamPacketConn, allowedClientIP)
-	}()
-	go func() {
-		upstreamToClientCh <- p.copySocks5UDPUpstreamToClient(ctx, upstreamPacketConn, clientPacketConn, associateAddr)
-	}()
-
-	var clientToUpstream udpCopyResult
-	var upstreamToClient udpCopyResult
-	clientToUpstreamDone := false
-	upstreamToClientDone := false
-	for !(clientToUpstreamDone && upstreamToClientDone) {
-		select {
-		case clientToUpstream = <-clientToUpstreamCh:
-			clientToUpstreamDone = true
-			cancel()
-		case upstreamToClient = <-upstreamToClientCh:
-			upstreamToClientDone = true
-			cancel()
-		case <-tcpDone:
-			cancel()
-		}
+	password := make([]byte, int(plen[0]))
+	if _, err := io.ReadFull(reader, password); err != nil {
+		return "", "", false
 	}
 
-	lifecycle.addEgressBytes(clientToUpstream.n)
-	lifecycle.addIngressBytes(upstreamToClient.n)
-	okResult := clientToUpstream.n > 0 && upstreamToClient.n > 0
-	if !okResult {
-		lifecycle.setProxyError(ErrUpstreamRequestFailed)
-		lifecycle.setHTTPStatus(ErrUpstreamRequestFailed.HTTPCode)
-		switch {
-		case !isBenignTunnelCopyError(clientToUpstream.err):
-			lifecycle.setUpstreamError("socks5_udp_client_to_upstream_copy", clientToUpstream.err)
-		case !isBenignTunnelCopyError(upstreamToClient.err):
-			lifecycle.setUpstreamError("socks5_udp_upstream_to_client_copy", upstreamToClient.err)
-		default:
-			lifecycle.setUpstreamError("socks5_udp_zero_traffic", nil)
-		}
+	if s.token != "" && string(password) != s.token {
+		_, _ = conn.Write([]byte{socks5UserPassVersion, socks5UserPassStatusFailure})
+		return "", "", false
 	}
-	lifecycle.setNetOK(okResult)
-	go p.health.RecordResult(nodeHash, okResult)
+	if requireAuthInfo && (len(username) == 0 || len(password) == 0) {
+		_, _ = conn.Write([]byte{socks5UserPassVersion, socks5UserPassStatusFailure})
+		return "", "", false
+	}
+
+	if _, err := conn.Write([]byte{socks5UserPassVersion, socks5UserPassStatusSuccess}); err != nil {
+		return "", "", false
+	}
+
+	platformName, account := parseV1PlatformAccountIdentity(string(username))
+	return platformName, account, true
 }
 
-func (p *Socks5Proxy) copySocks5UDPClientToUpstream(
-	ctx context.Context,
-	clientConn N.NetPacketConn,
-	upstreamConn N.NetPacketConn,
-	allowedClientIP string,
-) (result struct {
-	n   int64
-	err error
-}) {
-	for {
-		if err := clientConn.SetReadDeadline(time.Now().Add(250 * time.Millisecond)); err != nil {
-			result.err = err
-			return
+func containsSocks5Method(methods []byte, candidate byte) bool {
+	for _, method := range methods {
+		if method == candidate {
+			return true
 		}
-		buffer := buf.NewPacket()
-		source, err := clientConn.ReadPacket(buffer)
-		if err != nil {
-			buffer.Release()
-			if ctx.Err() != nil {
-				return
-			}
-			if isTemporaryTimeout(err) {
-				continue
-			}
-			result.err = err
-			return
-		}
-		if allowedClientIP != "" {
-			sourceIP := remoteIPString(source.UDPAddr())
-			if sourceIP != allowedClientIP {
-				buffer.Release()
-				continue
-			}
-		}
-		if buffer.Len() < 3 {
-			buffer.Release()
-			continue
-		}
-		if buffer.Byte(2) != 0 {
-			buffer.Release()
-			continue
-		}
-		buffer.Advance(3)
-		destination, err := M.SocksaddrSerializer.ReadAddrPort(buffer)
-		if err != nil {
-			buffer.Release()
-			continue
-		}
-		payloadBytes := append([]byte(nil), buffer.Bytes()...)
-		buffer.Release()
-		payload := buf.As(payloadBytes)
-		if err := upstreamConn.WritePacket(payload, destination); err != nil {
-			result.err = err
-			return
-		}
-		result.n += int64(3 + M.SocksaddrSerializer.AddrPortLen(destination) + len(payloadBytes))
-	}
-}
-
-func (p *Socks5Proxy) copySocks5UDPUpstreamToClient(
-	ctx context.Context,
-	upstreamConn N.NetPacketConn,
-	clientConn N.NetPacketConn,
-	clientAddr *net.UDPAddr,
-) (result struct {
-	n   int64
-	err error
-}) {
-	if clientAddr == nil {
-		result.err = errors.New("missing UDP client address")
-		return
-	}
-	for {
-		if err := upstreamConn.SetReadDeadline(time.Now().Add(250 * time.Millisecond)); err != nil {
-			result.err = err
-			return
-		}
-		buffer := buf.NewPacket()
-		destination, err := upstreamConn.ReadPacket(buffer)
-		if err != nil {
-			buffer.Release()
-			if ctx.Err() != nil {
-				return
-			}
-			if isTemporaryTimeout(err) {
-				continue
-			}
-			result.err = err
-			return
-		}
-		payloadBytes := append([]byte(nil), buffer.Bytes()...)
-		buffer.Release()
-		outBuffer := buf.NewSize(3 + M.SocksaddrSerializer.AddrPortLen(destination) + len(payloadBytes))
-		if _, err := outBuffer.Write([]byte{0x00, 0x00, 0x00}); err != nil {
-			outBuffer.Release()
-			result.err = err
-			return
-		}
-		if err := M.SocksaddrSerializer.WriteAddrPort(outBuffer, destination); err != nil {
-			outBuffer.Release()
-			result.err = err
-			return
-		}
-		if _, err := outBuffer.Write(payloadBytes); err != nil {
-			outBuffer.Release()
-			result.err = err
-			return
-		}
-		packetLen := len(outBuffer.Bytes())
-		writeErr := clientConn.WritePacket(outBuffer, M.SocksaddrFromNet(clientAddr))
-		if writeErr != nil {
-			result.err = writeErr
-			return
-		}
-		result.n += int64(packetLen)
-	}
-}
-
-func (p *Socks5Proxy) bindAdvertiseHost() string {
-	if p.advertiseHost != "" {
-		return p.advertiseHost
-	}
-	if p.listenAddress != "" && p.listenAddress != "0.0.0.0" && p.listenAddress != "::" {
-		return p.listenAddress
-	}
-	return "127.0.0.1"
-}
-
-func (p *Socks5Proxy) bindAddress() M.Socksaddr {
-	if p.listenPort <= 0 {
-		return M.Socksaddr{}
-	}
-	return M.ParseSocksaddr(net.JoinHostPort(p.bindAdvertiseHost(), fmt.Sprintf("%d", p.listenPort)))
-}
-
-func socksReplyCodeForProxyError(pe *ProxyError) byte {
-	if pe == nil {
-		return socks5.ReplyCodeFailure
-	}
-	switch pe {
-	case ErrAuthRequired, ErrAuthFailed:
-		return socks5.ReplyCodeNotAllowed
-	case ErrPlatformNotFound, ErrInvalidHost, ErrURLParseError, ErrInvalidProtocol:
-		return socks5.ReplyCodeHostUnreachable
-	case ErrNoAvailableNodes:
-		return socks5.ReplyCodeHostUnreachable
-	case ErrUpstreamTimeout:
-		return socks5.ReplyCodeTTLExpired
-	case ErrUpstreamConnectFailed:
-		return socks5.ReplyCodeHostUnreachable
-	case ErrUpstreamRequestFailed:
-		return socks5.ReplyCodeFailure
-	default:
-		return socks5.ReplyCodeFailure
-	}
-}
-
-func socksReplyCodeForError(err error, fallback *ProxyError) byte {
-	if code := socks5.ReplyCodeForError(err); code != socks5.ReplyCodeFailure {
-		return code
-	}
-	return socksReplyCodeForProxyError(fallback)
-}
-
-func remoteIPString(addr net.Addr) string {
-	if addr == nil {
-		return ""
-	}
-	if host, _, err := net.SplitHostPort(addr.String()); err == nil {
-		return host
-	}
-	return addr.String()
-}
-
-func isTemporaryTimeout(err error) bool {
-	if err == nil {
-		return false
-	}
-	if ne, ok := err.(net.Error); ok && ne.Timeout() {
-		return true
 	}
 	return false
+}
+
+func readSocks5ConnectRequest(reader *bufio.Reader) (string, byte, bool) {
+	header := make([]byte, 4)
+	if _, err := io.ReadFull(reader, header); err != nil {
+		return "", 0, false
+	}
+	if header[0] != socks5Version {
+		return "", socks5ReplyGeneralFailure, false
+	}
+	if header[1] != socks5CommandConnect {
+		return "", socks5ReplyCommandUnsupported, false
+	}
+
+	host, ok := readSocks5Address(reader, header[3])
+	if !ok {
+		if header[3] != socks5AddressTypeIPv4 && header[3] != socks5AddressTypeDomain && header[3] != socks5AddressTypeIPv6 {
+			return "", socks5ReplyAddressUnsupported, false
+		}
+		return "", socks5ReplyGeneralFailure, false
+	}
+
+	portBuf := make([]byte, 2)
+	if _, err := io.ReadFull(reader, portBuf); err != nil {
+		return "", 0, false
+	}
+	port := strconv.Itoa(int(binary.BigEndian.Uint16(portBuf)))
+	return net.JoinHostPort(host, port), 0, true
+}
+
+func readSocks5Address(reader *bufio.Reader, atyp byte) (string, bool) {
+	switch atyp {
+	case socks5AddressTypeIPv4:
+		ip := make([]byte, net.IPv4len)
+		if _, err := io.ReadFull(reader, ip); err != nil {
+			return "", false
+		}
+		return net.IP(ip).String(), true
+	case socks5AddressTypeIPv6:
+		ip := make([]byte, net.IPv6len)
+		if _, err := io.ReadFull(reader, ip); err != nil {
+			return "", false
+		}
+		return net.IP(ip).String(), true
+	case socks5AddressTypeDomain:
+		size := []byte{0}
+		if _, err := io.ReadFull(reader, size); err != nil {
+			return "", false
+		}
+		domain := make([]byte, int(size[0]))
+		if _, err := io.ReadFull(reader, domain); err != nil {
+			return "", false
+		}
+		return string(domain), true
+	default:
+		return "", false
+	}
+}
+
+func writeSocks5Reply(w io.Writer, replyCode byte, addr net.Addr) error {
+	atyp := byte(socks5AddressTypeIPv4)
+	hostBytes := []byte{0, 0, 0, 0}
+	port := uint16(0)
+
+	if tcpAddr, ok := addr.(*net.TCPAddr); ok && tcpAddr != nil {
+		if ip4 := tcpAddr.IP.To4(); ip4 != nil {
+			atyp = socks5AddressTypeIPv4
+			hostBytes = append([]byte(nil), ip4...)
+		} else if ip16 := tcpAddr.IP.To16(); ip16 != nil {
+			atyp = socks5AddressTypeIPv6
+			hostBytes = append([]byte(nil), ip16...)
+		}
+		if tcpAddr.Port >= 0 && tcpAddr.Port <= 65535 {
+			port = uint16(tcpAddr.Port)
+		}
+	}
+
+	resp := make([]byte, 0, 6+len(hostBytes))
+	resp = append(resp, socks5Version, replyCode, 0x00, atyp)
+	resp = append(resp, hostBytes...)
+	resp = binary.BigEndian.AppendUint16(resp, port)
+	_, err := w.Write(resp)
+	return err
 }
