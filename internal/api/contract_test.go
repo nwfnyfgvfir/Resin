@@ -91,9 +91,6 @@ func newControlPlaneTestServerWithBodyLimit(
 		MatcherRuntime: proxy.NewAccountMatcherRuntime(nil),
 		RuntimeCfg:     runtimeCfg,
 		EnvCfg: &config.EnvConfig{
-			DeploymentProfile:                               config.DeploymentProfileStandard,
-			Socks5AdvertiseHost:                             "contract.socks.test",
-			Socks5Port:                                      1080,
 			DefaultPlatformStickyTTL:                        30 * time.Minute,
 			DefaultPlatformRegexFilters:                     []string{},
 			DefaultPlatformRegionFilters:                    []string{},
@@ -1131,25 +1128,6 @@ func TestAPIContract_SystemEnvConfigSnapshot(t *testing.T) {
 	body := decodeJSONMap(t, rec)
 	if body["persistence_dialect"] != "" {
 		t.Fatalf("persistence_dialect: got %v, want empty string", body["persistence_dialect"])
-	}
-	if body["deployment_profile"] != string(cp.EnvCfg.DeploymentProfile) {
-		t.Fatalf("deployment_profile: got %v, want %s", body["deployment_profile"], cp.EnvCfg.DeploymentProfile)
-	}
-	if body["socks5_advertise_host"] != cp.EnvCfg.Socks5AdvertiseHost {
-		t.Fatalf("socks5_advertise_host: got %v, want %s", body["socks5_advertise_host"], cp.EnvCfg.Socks5AdvertiseHost)
-	}
-	if body["socks5_shared_on_resin_port"] != cp.EnvCfg.DeploymentProfile.SharesSocks5OnResinPort() {
-		t.Fatalf("socks5_shared_on_resin_port: got %v, want %v", body["socks5_shared_on_resin_port"], cp.EnvCfg.DeploymentProfile.SharesSocks5OnResinPort())
-	}
-	if body["socks5_port"] != float64(cp.EnvCfg.Socks5Port) {
-		t.Fatalf("socks5_port: got %v, want %d", body["socks5_port"], cp.EnvCfg.Socks5Port)
-	}
-	wantEffectiveSocks5Port := cp.EnvCfg.Socks5Port
-	if cp.EnvCfg.DeploymentProfile.SharesSocks5OnResinPort() {
-		wantEffectiveSocks5Port = cp.EnvCfg.ResinPort
-	}
-	if body["effective_socks5_port"] != float64(wantEffectiveSocks5Port) {
-		t.Fatalf("effective_socks5_port: got %v, want %d", body["effective_socks5_port"], wantEffectiveSocks5Port)
 	}
 	if body["default_platform_sticky_ttl"] != cp.EnvCfg.DefaultPlatformStickyTTL.String() {
 		t.Fatalf(

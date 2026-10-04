@@ -88,12 +88,8 @@ services:
       RESIN_PROXY_TOKEN: "my-token" # 修改为你的代理密码
       RESIN_LISTEN_ADDRESS: 0.0.0.0
       RESIN_PORT: 2260
-      RESIN_DEPLOYMENT_PROFILE: STANDARD # STANDARD = CONNECT + UDP ASSOCIATE，KOYEB_TCP = 在 RESIN_PORT 上单端口复用 CONNECT
-      RESIN_SOCKS5_PORT: 0 # STANDARD: 设为 1080 启用独立 SOCKS5 端口；KOYEB_TCP: 保持 0 或设为与 RESIN_PORT 相同
-      RESIN_SOCKS5_ADVERTISE_HOST: "" # 在 NAT/容器/端口映射场景下建议设置公网 IP 或域名
     ports:
       - "2260:2260"
-      # - "1080:1080" # 仅 STANDARD 独立 SOCKS5 端口场景需要取消注释
     volumes:
       - ./data/cache:/var/cache/resin
       - ./data/state:/var/lib/resin
@@ -101,28 +97,9 @@ services:
 ```
 运行 `docker compose up -d` 启动服务。
 
-SOCKS5 部署说明：
+入站接入由**接入点（endpoints）**管理。默认接入点监听 `RESIN_PORT`，在同一个端口上同时提供管理页面、HTTP 正向代理、HTTP 反向代理与 SOCKS5。可以在 WebUI 的**接入点**页面新增监听端口，并为每个端口独立开启 管理 / HTTP 正向 / HTTP 反向 / SOCKS5 能力。使用 Docker 时，请预先发布你要使用的端口。
 
-- `RESIN_DEPLOYMENT_PROFILE=STANDARD` 时，沿用原来的分端口模型。将 `RESIN_SOCKS5_PORT` 设置为 `1080` 等端口后，Resin 会在 HTTP 监听器之外额外启动一个独立的 SOCKS5 TCP 监听器。
-- `RESIN_DEPLOYMENT_PROFILE=KOYEB_TCP` 时，Resin 会切换为 `RESIN_PORT` 单端口模式：HTTP 正向代理、反向代理、控制面路由与 SOCKS5 `CONNECT` 共用同一个 TCP 端口；`UDP ASSOCIATE` 仍然会被拒绝。
-- 在 `KOYEB_TCP` 模式下，最简单的配置是保持 `RESIN_SOCKS5_PORT=0`；如果你希望在配置快照里显式看到共享端口，也可以把它设置为与 `RESIN_PORT` 相同。其他值在该模式下都属于无效配置。
-- `RESIN_SOCKS5_ADVERTISE_HOST` 用于控制 UDP ASSOCIATE 返回给客户端的地址。单机本地测试可留空；若部署在 NAT、容器或端口映射之后，应该填写客户端可达的公网 IP 或域名。
-- SOCKS5 认证复用 `RESIN_AUTH_VERSION` 与 `RESIN_PROXY_TOKEN`。例如在 `V1` 模式下，客户端可以使用 `Platform.Account` 作为用户名、`RESIN_PROXY_TOKEN` 作为密码。
-
-示例：
-
-```bash
-# VPS / 裸机：完整 SOCKS5（TCP + UDP）
-RESIN_DEPLOYMENT_PROFILE=STANDARD
-RESIN_SOCKS5_PORT=1080
-RESIN_SOCKS5_ADVERTISE_HOST=your-public-ip-or-domain
-```
-
-```bash
-# Koyeb 或其他仅 TCP 平台：在 RESIN_PORT 上单端口复用
-RESIN_DEPLOYMENT_PROFILE=KOYEB_TCP
-RESIN_SOCKS5_PORT=0
-```
+SOCKS5 认证复用 `RESIN_AUTH_VERSION` 与 `RESIN_PROXY_TOKEN`。例如在 `V1` 模式下，客户端可以使用 `Platform.Account` 作为用户名、`RESIN_PROXY_TOKEN` 作为密码。
 
 默认情况下，Resin 使用本地 SQLite 文件持久化。若要将核心 `state/cache` 持久化切换到 PostgreSQL，请设置：
 
@@ -178,17 +155,9 @@ curl -x http://127.0.0.1:2260 \
   https://api.ipify.org
 ```
 
-如果你的客户端支持 SOCKS5，也可以通过 SOCKS5 接入：
+如果你的客户端支持 SOCKS5，也可以在同一个端口上通过 SOCKS5 接入：
 
 ```bash
-# STANDARD 独立 SOCKS5 端口模式
-curl --proxy socks5h://127.0.0.1:1080 \
-  --proxy-user "Default.user_tom:my-token" \
-  https://api.ipify.org
-```
-
-```bash
-# KOYEB_TCP 单端口模式：SOCKS5 与 RESIN_PORT 共用同一入口
 curl --proxy socks5h://127.0.0.1:2260 \
   --proxy-user "Default.user_tom:my-token" \
   https://api.ipify.org
