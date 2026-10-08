@@ -1532,10 +1532,14 @@ func convertClashProxyToNode(proxy map[string]any) (ParsedNode, bool) {
 		if password := strings.TrimSpace(getString(proxy, "password")); password != "" {
 			outbound["password"] = password
 		}
-		if congestionControl := strings.TrimSpace(getString(proxy, "congestion-controller", "congestion_control")); congestionControl != "" {
+		// sing-box only accepts the lowercase algorithm names and fails the
+		// outbound build otherwise ("unknown congestion control algorithm"),
+		// which leaves the node permanently circuit-open. Panels write these in
+		// mixed case often enough that normalizing is worth it.
+		if congestionControl := strings.ToLower(strings.TrimSpace(getString(proxy, "congestion-controller", "congestion_control"))); congestionControl != "" {
 			outbound["congestion_control"] = congestionControl
 		}
-		if udpRelayMode := strings.TrimSpace(getString(proxy, "udp-relay-mode", "udp_relay_mode")); udpRelayMode != "" {
+		if udpRelayMode := strings.ToLower(strings.TrimSpace(getString(proxy, "udp-relay-mode", "udp_relay_mode"))); udpRelayMode != "" {
 			outbound["udp_relay_mode"] = udpRelayMode
 		}
 		if zeroRTT, ok := getBool(proxy, "reduce-rtt", "zero-rtt-handshake", "zero_rtt_handshake"); ok {
@@ -1776,7 +1780,12 @@ func normalizeVLESSFlow(raw string) string {
 	switch strings.ToLower(flow) {
 	case "", "none", "null":
 		return ""
-	case "xtls-rprx-vision":
+	case "xtls-rprx-vision", "xtls-rprx-vision-udp443":
+		// Xray accepts the `-udp443` variant (it only changes how the client
+		// handles UDP/443 locally; the flow sent on the wire is identical).
+		// sing-box rejects the suffixed spelling outright with
+		// "unsupported flow: ...", which breaks the outbound build, so the node
+		// would never be probed and would stay circuit-open forever.
 		return "xtls-rprx-vision"
 	default:
 		return ""
@@ -1801,6 +1810,17 @@ func normalizeShadowsocksMethod(raw string) string {
 	}
 	if strings.HasPrefix(upper, "AEAD_") {
 		return strings.ToLower(strings.ReplaceAll(strings.TrimPrefix(upper, "AEAD_"), "_", "-"))
+	}
+
+	// Xray and mihomo accept these short aliases for the IETF AEAD ciphers, but
+	// sing-box only knows the canonical `*-ietf-*` spellings and rejects the
+	// rest with "unknown method: ...". An outbound that fails to build is never
+	// probed, so the node stays circuit-open forever.
+	switch strings.ToLower(method) {
+	case "chacha20-poly1305":
+		return "chacha20-ietf-poly1305"
+	case "xchacha20-poly1305":
+		return "xchacha20-ietf-poly1305"
 	}
 	return strings.ToLower(method)
 }
@@ -4423,8 +4443,49 @@ func stripUnsupportedUTLS(outbound map[string]any) {
 	delete(tls, "utls")
 }
 
+// normalizeVmessSecurityMode resolves the ambiguous VMess "auto" security mode
+// to a concrete cipher.
+//
+// sing-box rewrites security "auto" to "zero" (no VMess-layer encryption) as
+// soon as TLS is enabled — see protocol/vmess/outbound.go:
+//
+//	if security == "auto" && outbound.tlsConfig != nil {
+//		security = "zero"
+//	}
+//
+// That only interoperates with another sing-box server. Xray and v2rayN instead
+// resolve "auto" to a real AEAD cipher, so nodes exported by mainstream panels
+// (where "auto" is the overwhelmingly common value) fail the VMess handshake
+// from Resin, are recorded as failed probes, and stay circuit-open forever.
+//
+// Resolving "auto" the same way Xray does keeps those subscriptions usable:
+//   - alter_id == 0 -> aes-128-gcm (AEAD, modern servers)
+//   - alter_id  > 0 -> aes-128-cfb (legacy non-AEAD servers)
+//
+// Explicitly configured modes (none/zero/aes-128-cfb/...) are left untouched.
+func normalizeVmessSecurityMode(outbound map[string]any) {
+	if outbound == nil {
+		return
+	}
+	if !strings.EqualFold(strings.TrimSpace(getString(outbound, "type")), "vmess") {
+		return
+	}
+
+	security := strings.ToLower(strings.TrimSpace(getString(outbound, "security")))
+	if security != "" && security != "auto" {
+		return
+	}
+
+	if alterID, ok := getUint(outbound, "alter_id", "alterId", "aid"); ok && alterID > 0 {
+		outbound["security"] = "aes-128-cfb"
+		return
+	}
+	outbound["security"] = "aes-128-gcm"
+}
+
 func buildParsedNode(outbound map[string]any) (ParsedNode, bool) {
 	stripUnsupportedUTLS(outbound)
+	normalizeVmessSecurityMode(outbound)
 	raw, err := json.Marshal(outbound)
 	if err != nil {
 		return ParsedNode{}, false

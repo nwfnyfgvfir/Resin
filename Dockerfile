@@ -22,7 +22,19 @@ ARG VERSION=dev
 ARG GIT_COMMIT=unknown
 ARG BUILD_TIME=unknown
 
-RUN CGO_ENABLED=0 go build -trimpath -tags "with_quic with_wireguard with_grpc with_utls" \
+# Build tags must stay in sync with .github/workflows/release.yml, otherwise the
+# affected protocols build without their backend and every such node ends up
+# permanently circuit-open (the outbound never builds, so it is never probed).
+#   with_quic       -> tuic / hysteria2
+#   with_utls       -> REALITY (all of them)
+#   with_gvisor     -> WireGuard (Resin emits no `system_interface`, so sing-box
+#                      uses the gVisor stack; without this tag the build fails
+#                      with "gVisor is not included in this build")
+#   with_wireguard  -> WireGuard
+#   with_grpc       -> v2ray gRPC transport
+# `with_embedded_tor` is intentionally omitted: it requires CGO and this stage
+# builds with CGO_ENABLED=0. Release images (release.yml) do include it.
+RUN CGO_ENABLED=0 go build -trimpath -tags "with_quic with_wireguard with_grpc with_utls with_gvisor" \
   -ldflags="-s -w \
   -X github.com/Resinat/Resin/internal/buildinfo.Version=${VERSION} \
   -X github.com/Resinat/Resin/internal/buildinfo.GitCommit=${GIT_COMMIT} \
