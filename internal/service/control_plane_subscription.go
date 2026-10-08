@@ -50,6 +50,9 @@ type SubscriptionBackupItem struct {
 	UpdateInterval          string `json:"update_interval"`
 	Enabled                 bool   `json:"enabled"`
 	Ephemeral               bool   `json:"ephemeral"`
+	// Pointer so backups written before this field existed still load: a nil
+	// value falls back to the current default instead of forcing false.
+	IncrementalAliveNodes   *bool  `json:"incremental_alive_nodes,omitempty"`
 	EphemeralNodeEvictDelay string `json:"ephemeral_node_evict_delay"`
 }
 
@@ -231,6 +234,7 @@ func parseSubscriptionSourceType(raw *string) (string, *ServiceError) {
 }
 
 func backupItemFromResponse(sub SubscriptionResponse) SubscriptionBackupItem {
+	incrementalAliveNodes := sub.IncrementalAliveNodes
 	return SubscriptionBackupItem{
 		Name:                    sub.Name,
 		SourceType:              sub.SourceType,
@@ -239,6 +243,7 @@ func backupItemFromResponse(sub SubscriptionResponse) SubscriptionBackupItem {
 		UpdateInterval:          sub.UpdateInterval,
 		Enabled:                 sub.Enabled,
 		Ephemeral:               sub.Ephemeral,
+		IncrementalAliveNodes:   &incrementalAliveNodes,
 		EphemeralNodeEvictDelay: sub.EphemeralNodeEvictDelay,
 	}
 }
@@ -261,12 +266,15 @@ func createSubscriptionRequestFromBackupItem(item SubscriptionBackupItem) (Creat
 		ephemeralNodeEvictDelay = defaultSubscriptionEphemeralNodeEvictDelay.String()
 	}
 
+	// IncrementalAliveNodes stays nil when the backup predates the field, which
+	// lets CreateSubscription apply its current default.
 	req := CreateSubscriptionRequest{
 		Name:                    &name,
 		SourceType:              &sourceType,
 		UpdateInterval:          &updateInterval,
 		Enabled:                 &item.Enabled,
 		Ephemeral:               &item.Ephemeral,
+		IncrementalAliveNodes:   item.IncrementalAliveNodes,
 		EphemeralNodeEvictDelay: &ephemeralNodeEvictDelay,
 	}
 	switch sourceType {
@@ -338,7 +346,10 @@ func (s *ControlPlaneService) CreateSubscription(req CreateSubscriptionRequest) 
 	if req.Ephemeral != nil {
 		ephemeral = *req.Ephemeral
 	}
-	incrementalAliveNodes := false
+	// Incremental alive-node mode is on by default: a refresh then keeps the
+	// already-known healthy nodes instead of replacing the whole set, which
+	// avoids dropping live nodes on a partial/flaky subscription fetch.
+	incrementalAliveNodes := true
 	if req.IncrementalAliveNodes != nil {
 		incrementalAliveNodes = *req.IncrementalAliveNodes
 	}

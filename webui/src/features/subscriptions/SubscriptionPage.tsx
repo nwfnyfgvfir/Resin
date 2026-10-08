@@ -222,7 +222,7 @@ export function SubscriptionPage() {
       ephemeral_node_evict_delay: "72h",
       enabled: true,
       ephemeral: false,
-      incremental_alive_nodes: false,
+      incremental_alive_nodes: true,
     },
   });
 
@@ -240,7 +240,7 @@ export function SubscriptionPage() {
       ephemeral_node_evict_delay: "72h",
       enabled: true,
       ephemeral: false,
-      incremental_alive_nodes: false,
+      incremental_alive_nodes: true,
     },
   });
 
@@ -321,7 +321,7 @@ export function SubscriptionPage() {
         ephemeral_node_evict_delay: "72h",
         enabled: true,
         ephemeral: false,
-        incremental_alive_nodes: false,
+        incremental_alive_nodes: true,
       });
       showToast("success", t("订阅 {{name}} 创建成功", { name: created.name }));
     },
