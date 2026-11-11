@@ -22,6 +22,7 @@ type EphemeralCleaner struct {
 	autoRemoveUnhealthyNodesEnabled func() bool
 	autoRemoveUnhealthyNodesDelay   func() time.Duration
 	autoDeleteEmptySubscriptions    func() bool
+	highLatencyPolicy               func() (enabled bool, thresholdMS int, authorities []string)
 
 	onEmptySubscription func(subID string)
 
@@ -60,6 +61,11 @@ func (c *EphemeralCleaner) SetGlobalAutoRemove(
 // nodes should be deleted after auto-removal.
 func (c *EphemeralCleaner) SetAutoDeleteEmptySubscriptions(enabled func() bool) {
 	c.autoDeleteEmptySubscriptions = enabled
+}
+
+// SetHighLatencyPolicy configures independent, hot-updatable latency cleanup.
+func (c *EphemeralCleaner) SetHighLatencyPolicy(policy func() (bool, int, []string)) {
+	c.highLatencyPolicy = policy
 }
 
 // SetOnEmptySubscription sets callback invoked when an eligible subscription
@@ -102,7 +108,7 @@ func (c *EphemeralCleaner) sweepWithHook(betweenScans func()) {
 	globalAutoRemove := c.globalAutoRemoveEnabled()
 
 	c.subManager.Range(func(id string, sub *subscription.Subscription) bool {
-		if sub.Ephemeral() || globalAutoRemove {
+		if sub.Ephemeral() || globalAutoRemove || c.highLatencyEnabled() {
 			targetSubs = append(targetSubs, subscriptionTarget{id: id, sub: sub})
 		}
 		return true
@@ -145,12 +151,23 @@ func (c *EphemeralCleaner) sweepOneSubscription(
 		evictedHashes []node.Hash
 	)
 	sub.WithOpLock(func() {
+		// Ignore a subscription deleted while this sweep was waiting for its lock.
+		if c.subManager.Lookup(id) != sub {
+			return
+		}
 		evictDelayNs := c.evictDelayNs(sub)
 		evictCount, evictedHashes = CleanupSubscriptionNodesWithConfirmNoLock(
 			sub,
 			c.pool,
 			func(entry *node.NodeEntry) bool {
-				return c.shouldEvictEntry(entry, now, evictDelayNs)
+				if c.participatesInUnhealthyRemoval(sub) && c.shouldEvictEntry(entry, now, evictDelayNs) {
+					return true
+				}
+				if c.highLatencyPolicy != nil {
+					enabled, thresholdMS, authorities := c.highLatencyPolicy()
+					return enabled && node.ExceedsReferenceLatency(entry, authorities, thresholdMS)
+				}
+				return false
 			},
 			betweenScans,
 		)
@@ -189,7 +206,19 @@ func (c *EphemeralCleaner) autoDeleteEmptySubscriptionsEnabled() bool {
 }
 
 func (c *EphemeralCleaner) participatesInAutoRemove(sub *subscription.Subscription) bool {
+	return c.participatesInUnhealthyRemoval(sub) || c.highLatencyEnabled()
+}
+
+func (c *EphemeralCleaner) participatesInUnhealthyRemoval(sub *subscription.Subscription) bool {
 	return sub.Ephemeral() || c.globalAutoRemoveEnabled()
+}
+
+func (c *EphemeralCleaner) highLatencyEnabled() bool {
+	if c.highLatencyPolicy == nil {
+		return false
+	}
+	enabled, _, _ := c.highLatencyPolicy()
+	return enabled
 }
 
 func (c *EphemeralCleaner) globalAutoRemoveEnabled() bool {
@@ -222,5 +251,5 @@ func (c *EphemeralCleaner) shouldEvictEntry(entry *node.NodeEntry, now int64, ev
 
 	// Circuit remains open beyond configured eviction delay.
 	circuitSince := entry.CircuitOpenSince.Load()
-	return circuitSince > 0 && (now-circuitSince) > evictDelayNs
+	return circuitSince > 0 && entry.FailureCount.Load() > 0 && (now-circuitSince) > evictDelayNs
 }

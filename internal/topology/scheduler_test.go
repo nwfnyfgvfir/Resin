@@ -1096,6 +1096,7 @@ func TestEphemeralCleaner_DisabledEphemeralStillEvicted(t *testing.T) {
 
 	entry, _ := pool.GetEntry(h)
 	entry.CircuitOpenSince.Store(time.Now().Add(-2 * time.Minute).UnixNano())
+	entry.FailureCount.Store(3)
 
 	cleaner := NewEphemeralCleaner(subMgr, pool)
 	cleaner.sweep()

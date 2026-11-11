@@ -3452,7 +3452,10 @@ func parseHysteria2URI(uri string) (ParsedNode, bool) {
 }
 
 func parseSSURI(uri string) (ParsedNode, bool) {
-	raw := strings.TrimSpace(strings.TrimPrefix(uri, "ss://"))
+	if !strings.HasPrefix(strings.ToLower(uri), "ss://") {
+		return ParsedNode{}, false
+	}
+	raw := strings.TrimSpace(uri[len("ss://"):])
 	if raw == "" {
 		return ParsedNode{}, false
 	}
@@ -3463,8 +3466,13 @@ func parseSSURI(uri string) (ParsedNode, bool) {
 	plugin, pluginOpts := parseSSPluginFromQuery(rawQuery)
 
 	if at := strings.LastIndex(beforeQuery, "@"); at > 0 && at < len(beforeQuery)-1 {
-		left := beforeQuery[:at]
-		hostport := beforeQuery[at+1:]
+		// SIP002 permits percent-encoded plaintext credentials and an optional
+		// slash between the authority and query. Preserve literal '+' in keys.
+		left, err := url.PathUnescape(beforeQuery[:at])
+		if err != nil {
+			return ParsedNode{}, false
+		}
+		hostport := strings.TrimSuffix(beforeQuery[at+1:], "/")
 		method, password, ok := parseSSMethodPassword(left)
 		if !ok {
 			return ParsedNode{}, false

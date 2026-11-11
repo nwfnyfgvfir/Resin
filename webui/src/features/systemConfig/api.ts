@@ -22,6 +22,8 @@ const DEFAULT_CONFIG: RuntimeConfig = {
   cache_flush_dirty_threshold: 0,
   auto_remove_unhealthy_nodes_enabled: false,
   auto_remove_unhealthy_nodes_delay: "",
+  auto_remove_high_latency_nodes_enabled: false,
+  auto_remove_high_latency_nodes_threshold_ms: 1000,
   auto_delete_empty_subscriptions_enabled: false,
 };
 
@@ -83,6 +85,11 @@ function normalizeRuntimeConfig(raw: Partial<RuntimeConfig> | null | undefined):
       DEFAULT_CONFIG.cache_flush_dirty_threshold,
     ),
     auto_remove_unhealthy_nodes_enabled: Boolean(raw.auto_remove_unhealthy_nodes_enabled),
+    auto_remove_high_latency_nodes_enabled: Boolean(raw.auto_remove_high_latency_nodes_enabled),
+    auto_remove_high_latency_nodes_threshold_ms: asNumber(
+      raw.auto_remove_high_latency_nodes_threshold_ms,
+      DEFAULT_CONFIG.auto_remove_high_latency_nodes_threshold_ms,
+    ),
     auto_remove_unhealthy_nodes_delay: asString(
       raw.auto_remove_unhealthy_nodes_delay,
       DEFAULT_CONFIG.auto_remove_unhealthy_nodes_delay,

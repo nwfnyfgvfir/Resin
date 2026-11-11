@@ -15,6 +15,23 @@ type exportNodesRequest struct {
 	NodeHashes []string `json:"node_hashes"`
 }
 
+// HandleCleanupNodes handles POST /api/v1/nodes:cleanup.
+func HandleCleanupNodes(cp *service.ControlPlaneService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req service.NodeCleanupRequest
+		if err := DecodeBody(r, &req); err != nil {
+			writeDecodeBodyError(w, err)
+			return
+		}
+		result, err := cp.CleanupNodes(req)
+		if err != nil {
+			writeServiceError(w, err)
+			return
+		}
+		WriteJSON(w, http.StatusOK, result)
+	}
+}
+
 func nodeTagSortKey(n service.NodeSummary) string {
 	if n.DisplayTag != "" {
 		return n.DisplayTag

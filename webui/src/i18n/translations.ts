@@ -4,6 +4,23 @@ export const APP_TITLE_ZH = "Resin · 高性能粘性代理池";
 const APP_TITLE_EN = "Resin · Sticky Proxy Pool";
 
 const EXACT_ZH_TO_EN: Record<string, string> = {
+  "节点清理": "Node Cleanup",
+  "仅清理选中节点。失效清理保留待测节点，高延迟清理保留无测速数据的节点。": "Cleanup applies to selected nodes only. Failed-node cleanup keeps untested nodes; high latency cleanup keeps nodes without measurements.",
+  "取消选择": "Clear Selection",
+  "已选 {{count}} 个节点": "{{count}} nodes selected",
+  "高延迟阈值（ms）": "High latency threshold (ms)",
+  "清理选中失效节点": "Clean Up Failed Nodes",
+  "清理选中高延迟节点": "Clean Up High Latency Nodes",
+  "自动清理高延迟节点": "Automatically remove high latency nodes",
+  "保存设置": "Save Settings",
+  "高延迟自动清理设置已保存": "Automatic high latency cleanup settings saved",
+  "已清理 {{cleaned}} 个节点，跳过 {{skipped}} 个未满足条件的节点": "Removed {{cleaned}} nodes; skipped {{skipped}} nodes that did not meet the criteria",
+  "超过阈值才会清理。自动清理对所有订阅生效，由服务端持续执行，关闭页面后仍生效。": "Nodes are removed only above the threshold. Automatic cleanup runs on the server for all subscriptions, even after closing this page.",
+  "延迟阈值必须是 1 到 2147483647 之间的整数": "The latency threshold must be an integer between 1 and 2147483647",
+  "自动清理按参考延迟判断，超过阈值才会清理；没有延迟数据的节点会保留。": "Automatic cleanup uses reference latency and removes nodes only above the threshold. Nodes without latency data are kept.",
+  "搜索区域名称或代码": "Search region name or code",
+  "清除区域筛选": "Clear Region Filter",
+  "没有匹配的区域": "No matching regions",
   "Resin · 高性能粘性代理池": APP_TITLE_EN,
   "高性能粘性代理池 · 管理面板": "High-performance sticky proxy pool · Admin Console",
   "主导航": "Main Navigation",

@@ -876,6 +876,7 @@ func TestEphemeralCleaner_EvictsCircuitBroken(t *testing.T) {
 	// Circuit-break the node for longer than evict delay.
 	entry, _ := pool.GetEntry(h)
 	entry.CircuitOpenSince.Store(time.Now().Add(-2 * time.Minute).UnixNano())
+	entry.FailureCount.Store(3)
 
 	cleaner := NewEphemeralCleaner(subMgr, pool)
 	cleaner.sweep()
@@ -912,6 +913,7 @@ func TestEphemeralCleaner_SkipsNonEphemeral(t *testing.T) {
 
 	entry, _ := pool.GetEntry(h)
 	entry.CircuitOpenSince.Store(time.Now().Add(-2 * time.Minute).UnixNano())
+	entry.FailureCount.Store(3)
 
 	cleaner := NewEphemeralCleaner(subMgr, pool)
 	cleaner.sweep()
@@ -939,6 +941,7 @@ func TestEphemeralCleaner_GlobalAutoRemoveEvictsNonEphemeral(t *testing.T) {
 
 	entry, _ := pool.GetEntry(h)
 	entry.CircuitOpenSince.Store(time.Now().Add(-2 * time.Minute).UnixNano())
+	entry.FailureCount.Store(3)
 
 	cleaner := NewEphemeralCleaner(subMgr, pool)
 	cleaner.SetGlobalAutoRemove(
@@ -979,6 +982,7 @@ func TestEphemeralCleaner_DeletesEmptyEphemeralSubscription(t *testing.T) {
 
 	entry, _ := pool.GetEntry(h)
 	entry.CircuitOpenSince.Store(time.Now().Add(-2 * time.Minute).UnixNano())
+	entry.FailureCount.Store(3)
 
 	cleaner := NewEphemeralCleaner(subMgr, pool)
 	cleaner.SetAutoDeleteEmptySubscriptions(func() bool { return true })

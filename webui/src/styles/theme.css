@@ -3540,3 +3540,85 @@ a {
     transform: translateY(-20px) scale(0.92);
   }
 }
+.region-combobox {
+  position: relative;
+  min-width: 0;
+}
+
+.nodes-page > .filter-card {
+  position: relative;
+  z-index: 2;
+}
+
+.region-combobox-icon {
+  position: absolute;
+  right: 0.5rem;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-muted);
+  border: 0;
+  background: transparent;
+  padding: 0;
+  display: flex;
+  cursor: pointer;
+}
+
+.region-combobox-menu {
+  position: absolute;
+  z-index: 50;
+  top: calc(100% + 4px);
+  left: 0;
+  width: max-content;
+  min-width: 100%;
+  max-width: min(320px, 80vw);
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-strong);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.15);
+}
+
+.region-combobox-option {
+  padding: 6px 10px;
+  font-size: 0.8125rem;
+  border-radius: 4px;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.region-combobox-option.active {
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+
+.region-combobox-empty { padding: 4px 10px; font-size: 0.8125rem; }
+
+.node-cleanup-card { padding: 16px; }
+.node-cleanup-heading, .node-cleanup-controls, .node-cleanup-selection, .node-cleanup-actions, .node-cleanup-auto {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.node-cleanup-heading { justify-content: space-between; margin-bottom: 12px; }
+.node-cleanup-heading h3 { display: flex; align-items: center; gap: 6px; margin: 0; font-size: 0.9375rem; }
+.node-cleanup-heading p { margin: 4px 0 0; color: var(--text-muted); font-size: 0.8125rem; }
+.node-cleanup-selection { color: var(--text-muted); font-size: 0.8125rem; }
+.node-cleanup-controls { align-items: flex-end; }
+.node-cleanup-threshold { flex: 0 1 160px; }
+.node-cleanup-actions { gap: 8px; min-height: 40px; }
+.node-cleanup-auto { margin-left: auto; min-height: 40px; font-size: 0.8125rem; }
+.node-cleanup-card > .field-hint {
+  margin: 10px 0 0;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+.node-cleanup-card > .field-error { color: var(--danger); font-size: 0.8125rem; margin-top: 8px; }
+
+@media (max-width: 720px) {
+  .node-cleanup-auto { margin-left: 0; width: 100%; }
+  .node-cleanup-threshold { flex-basis: 100%; }
+}

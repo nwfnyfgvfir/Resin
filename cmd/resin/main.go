@@ -330,6 +330,10 @@ func newTopologyRuntime(
 	ephemeralCleaner.SetAutoDeleteEmptySubscriptions(func() bool {
 		return runtimeConfigSnapshot(runtimeCfg).AutoDeleteEmptySubscriptionsEnabled
 	})
+	ephemeralCleaner.SetHighLatencyPolicy(func() (bool, int, []string) {
+		cfg := runtimeConfigSnapshot(runtimeCfg)
+		return cfg.AutoRemoveHighLatencyNodesEnabled, cfg.AutoRemoveHighLatencyNodesThresholdMS, cfg.LatencyAuthorities
+	})
 	ephemeralCleaner.SetOnNodeEvicted(func(subID string, hash node.Hash) {
 		engine.MarkSubscriptionNode(subID, hash.Hex())
 	})

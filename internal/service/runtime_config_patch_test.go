@@ -68,10 +68,12 @@ func TestPatchRuntimeConfig_HotUpdatePersistsAndSurvivesRestart(t *testing.T) {
 	h := newPatchHarness(t)
 
 	patch := map[string]any{
-		"request_log_enabled":                     true,
-		"reverse_proxy_log_req_headers_max_bytes": 2048,
-		"p2c_latency_window":                      "7m",
-		"cache_flush_interval":                    "30s",
+		"request_log_enabled":                         true,
+		"reverse_proxy_log_req_headers_max_bytes":     2048,
+		"p2c_latency_window":                          "7m",
+		"cache_flush_interval":                        "30s",
+		"auto_remove_high_latency_nodes_enabled":      true,
+		"auto_remove_high_latency_nodes_threshold_ms": 750,
 	}
 	body, err := json.Marshal(patch)
 	if err != nil {
@@ -129,6 +131,9 @@ func TestPatchRuntimeConfig_HotUpdatePersistsAndSurvivesRestart(t *testing.T) {
 	afterRestart, _, err := engine2.GetSystemConfig()
 	if err != nil {
 		t.Fatalf("GetSystemConfig (restart): %v", err)
+	}
+	if !afterRestart.AutoRemoveHighLatencyNodesEnabled || afterRestart.AutoRemoveHighLatencyNodesThresholdMS != 750 {
+		t.Fatalf("restart did not preserve latency cleanup: %+v", afterRestart)
 	}
 	if !afterRestart.RequestLogEnabled ||
 		afterRestart.ReverseProxyLogReqHeadersMaxBytes != 2048 ||

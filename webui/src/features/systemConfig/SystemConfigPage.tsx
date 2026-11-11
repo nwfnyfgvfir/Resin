@@ -33,6 +33,8 @@ type RuntimeConfigForm = {
   cache_flush_dirty_threshold: string;
   auto_remove_unhealthy_nodes_enabled: boolean;
   auto_remove_unhealthy_nodes_delay: string;
+  auto_remove_high_latency_nodes_enabled: boolean;
+  auto_remove_high_latency_nodes_threshold_ms: string;
   auto_delete_empty_subscriptions_enabled: boolean;
 };
 
@@ -55,6 +57,8 @@ const EDITABLE_FIELDS: Array<keyof RuntimeConfig> = [
   "cache_flush_dirty_threshold",
   "auto_remove_unhealthy_nodes_enabled",
   "auto_remove_unhealthy_nodes_delay",
+  "auto_remove_high_latency_nodes_enabled",
+  "auto_remove_high_latency_nodes_threshold_ms",
   "auto_delete_empty_subscriptions_enabled",
 ];
 
@@ -77,6 +81,8 @@ const FIELD_LABELS: Record<keyof RuntimeConfig, string> = {
   cache_flush_dirty_threshold: "缓存刷盘脏阈值",
   auto_remove_unhealthy_nodes_enabled: "自动删除不可用节点",
   auto_remove_unhealthy_nodes_delay: "不可用节点删除延迟",
+  auto_remove_high_latency_nodes_enabled: "自动清理高延迟节点",
+  auto_remove_high_latency_nodes_threshold_ms: "高延迟阈值（ms）",
   auto_delete_empty_subscriptions_enabled: "节点全部删除后自动删除订阅",
 };
 
@@ -122,6 +128,8 @@ function configToForm(config: RuntimeConfig): RuntimeConfigForm {
     cache_flush_dirty_threshold: String(config.cache_flush_dirty_threshold),
     auto_remove_unhealthy_nodes_enabled: config.auto_remove_unhealthy_nodes_enabled,
     auto_remove_unhealthy_nodes_delay: config.auto_remove_unhealthy_nodes_delay,
+    auto_remove_high_latency_nodes_enabled: config.auto_remove_high_latency_nodes_enabled,
+    auto_remove_high_latency_nodes_threshold_ms: String(config.auto_remove_high_latency_nodes_threshold_ms),
     auto_delete_empty_subscriptions_enabled: config.auto_delete_empty_subscriptions_enabled,
   };
 }
@@ -165,6 +173,10 @@ function displayPersistenceDialect(value: string): string {
 }
 
 function parseForm(form: RuntimeConfigForm): RuntimeConfig {
+  const highLatencyThreshold = parseNonNegativeInt("高延迟阈值（ms）", form.auto_remove_high_latency_nodes_threshold_ms);
+  if (highLatencyThreshold < 1 || highLatencyThreshold > 2147483647) {
+    throw new Error(i18next.t("延迟阈值必须是 1 到 2147483647 之间的整数"));
+  }
   const latencyURL = form.latency_test_url.trim();
   if (!latencyURL) {
     throw new Error("延迟测试目标 URL 不能为空");
@@ -204,6 +216,8 @@ function parseForm(form: RuntimeConfigForm): RuntimeConfig {
     cache_flush_dirty_threshold: parseNonNegativeInt("缓存刷盘脏阈值", form.cache_flush_dirty_threshold),
     auto_remove_unhealthy_nodes_enabled: form.auto_remove_unhealthy_nodes_enabled,
     auto_remove_unhealthy_nodes_delay: parseDurationField("不可用节点删除延迟", form.auto_remove_unhealthy_nodes_delay),
+    auto_remove_high_latency_nodes_enabled: form.auto_remove_high_latency_nodes_enabled,
+    auto_remove_high_latency_nodes_threshold_ms: highLatencyThreshold,
     auto_delete_empty_subscriptions_enabled: form.auto_delete_empty_subscriptions_enabled,
   };
 }
@@ -537,6 +551,26 @@ export function SystemConfigPage() {
                     />
                   </div>
                 </div>
+                <div className="form-grid" style={{ marginTop: "16px" }}>
+                  <div className="field-group">
+                    <label className="field-label" htmlFor="sys-auto-high-latency">{t("自动清理高延迟节点")}</label>
+                    <div style={{ display: "flex", alignItems: "center" }}>
+                      <Switch id="sys-auto-high-latency" checked={form.auto_remove_high_latency_nodes_enabled}
+                        onChange={(event) => setFormField("auto_remove_high_latency_nodes_enabled", event.target.checked)} />
+                      {renderRestoreButton("auto_remove_high_latency_nodes_enabled")}
+                    </div>
+                  </div>
+                  <div className="field-group">
+                    <div style={{ display: "flex", alignItems: "center" }}>
+                      <label className="field-label" htmlFor="sys-high-latency-threshold" style={{ margin: 0 }}>{t("高延迟阈值（ms）")}</label>
+                      {renderRestoreButton("auto_remove_high_latency_nodes_threshold_ms")}
+                    </div>
+                    <Input id="sys-high-latency-threshold" type="number" min={1} max={2147483647} step={1}
+                      value={form.auto_remove_high_latency_nodes_threshold_ms}
+                      onChange={(event) => setFormField("auto_remove_high_latency_nodes_threshold_ms", event.target.value)} />
+                  </div>
+                </div>
+                <p className="field-hint">{t("自动清理按参考延迟判断，超过阈值才会清理；没有延迟数据的节点会保留。")}</p>
                 <p className="field-hint" style={{ marginTop: "8px" }}>
                   {t("启用后，所有非临时订阅中持续熔断或出站构建失败的节点会在延迟到期后被自动删除。临时订阅仍使用各自的驱逐延迟。")}
                 </p>

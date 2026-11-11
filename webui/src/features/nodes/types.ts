@@ -65,3 +65,11 @@ export type LatencyProbeResult = {
 };
 
 export type NodeExportText = string;
+
+export type NodeCleanupMode = "unhealthy" | "high_latency";
+
+export type NodeCleanupResult = {
+  cleaned_count: number;
+  skipped_count: number;
+  cleaned_node_hashes: string[];
+};

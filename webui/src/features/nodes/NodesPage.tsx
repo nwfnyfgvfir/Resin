@@ -20,7 +20,9 @@ import type { Platform } from "../platforms/types";
 import { listSubscriptions } from "../subscriptions/api";
 import { exportNodes, getNode, listNodes, probeEgress, probeLatency } from "./api";
 import type { NodeExportText, NodeSummary } from "./types";
-import { getAllRegions, getRegionName } from "./regions";
+import { getRegionName } from "./regions";
+import { RegionSelect } from "./RegionSelect";
+import { NodeCleanupPanel } from "./NodeCleanupPanel";
 import type { NodeListFilters, NodeSortBy, SortOrder } from "./types";
 
 type NodeStatusFilter = "all" | "healthy" | "circuit_open" | "error" | "disabled";
@@ -301,8 +303,6 @@ export function NodesPage() {
   const pendingLatencyHashesRef = useRef<Set<string>>(new Set());
 
   const queryClient = useQueryClient();
-
-  const allRegions = useMemo(() => getAllRegions(), []);
 
   const platformsQuery = useQuery({
     queryKey: ["platforms", "all"],
@@ -842,19 +842,12 @@ export function NodesPage() {
               <label htmlFor="node-region" style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
                 {t("区域")}
               </label>
-              <Select
+              <RegionSelect
                 id="node-region"
                 value={draftFilters.region}
-                onChange={(event) => handleFilterChange("region", event.target.value)}
+                onChange={(code) => handleFilterChange("region", code)}
                 style={NODE_FILTER_CONTROL_STYLE}
-              >
-                <option value="">{t("全部")}</option>
-                {allRegions.map((r) => (
-                  <option key={r.code} value={r.code}>
-                    {r.name}
-                  </option>
-                ))}
-              </Select>
+              />
             </div>
 
             <div style={NODE_FILTER_ITEM_STYLE}>
@@ -905,6 +898,18 @@ export function NodesPage() {
           </div>
         </div>
       </Card>
+
+      <NodeCleanupPanel
+        selectedHashes={selectedNodeHashes}
+        onClearSelection={() => setSelectedNodeHashes(new Set())}
+        showToast={showToast}
+        onCleaned={(result) => {
+          const cleaned = new Set(result.cleaned_node_hashes);
+          setSelectedNodeHashes((previous) => new Set([...previous].filter((hash) => !cleaned.has(hash))));
+          if (cleaned.has(selectedNodeHash)) setDrawerOpen(false);
+          if (result.cleaned_count) setPage(0);
+        }}
+      />
 
       <Card className="nodes-table-card platform-cards-container subscriptions-table-card">
         {nodesQuery.isLoading ? <p className="muted">{t("正在加载节点数据...")}</p> : null}

@@ -9,17 +9,19 @@ countries.registerLocale(zhLocale);
 export interface RegionOption {
     code: string;
     name: string;
+    searchText: string;
 }
 
 function getCountryLocale(): "zh" | "en" {
     return isEnglishLocale(getCurrentLocale()) ? "en" : "zh";
 }
 
-export const getAllRegions = (): RegionOption[] => {
-    const names = countries.getNames(getCountryLocale(), { select: "official" });
+export const getAllRegions = (locale = getCurrentLocale()): RegionOption[] => {
+    const names = countries.getNames(isEnglishLocale(locale) ? "en" : "zh", { select: "official" });
     return Object.entries(names).map(([code, name]) => ({
         code,
         name: `${code} (${name})`,
+        searchText: `${code} ${countries.getName(code, "zh")} ${countries.getName(code, "en")}`.toLocaleLowerCase(),
     })).sort((a, b) => a.code.localeCompare(b.code));
 };
 

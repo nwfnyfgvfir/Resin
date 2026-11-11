@@ -44,6 +44,7 @@ func TestEphemeralCleaner_TOCTOU_RecoveryBetweenScans(t *testing.T) {
 	// Node is circuit-broken long enough to qualify for eviction.
 	pastTime := time.Now().Add(-1 * time.Hour).UnixNano()
 	entry.CircuitOpenSince.Store(pastTime)
+	entry.FailureCount.Store(3)
 
 	cleaner := NewEphemeralCleaner(subMgr, pool)
 
@@ -98,6 +99,7 @@ func TestEphemeralCleaner_ConfirmedEviction(t *testing.T) {
 
 	pastTime := time.Now().Add(-1 * time.Hour).UnixNano()
 	entry.CircuitOpenSince.Store(pastTime)
+	entry.FailureCount.Store(3)
 
 	cleaner := NewEphemeralCleaner(subMgr, pool)
 	cleaner.sweep()
@@ -223,6 +225,7 @@ func TestEphemeralCleaner_NonEphemeralSkipped(t *testing.T) {
 
 	pastTime := time.Now().Add(-1 * time.Hour).UnixNano()
 	entry.CircuitOpenSince.Store(pastTime)
+	entry.FailureCount.Store(3)
 
 	cleaner := NewEphemeralCleaner(subMgr, pool)
 	cleaner.sweep()
@@ -252,6 +255,7 @@ func TestEphemeralCleaner_DynamicEvictDelayPulled(t *testing.T) {
 		t.Fatal("entry not found")
 	}
 	entry.CircuitOpenSince.Store(time.Now().Add(-2 * time.Minute).UnixNano())
+	entry.FailureCount.Store(3)
 
 	sub.SetEphemeralNodeEvictDelayNs(int64(10 * time.Minute))
 	cleaner := NewEphemeralCleaner(subMgr, pool)
@@ -311,6 +315,8 @@ func TestEphemeralCleaner_SweepSubscriptionsInParallel(t *testing.T) {
 	pastTime := time.Now().Add(-1 * time.Hour).UnixNano()
 	entry1.CircuitOpenSince.Store(pastTime)
 	entry2.CircuitOpenSince.Store(pastTime)
+	entry1.FailureCount.Store(3)
+	entry2.FailureCount.Store(3)
 
 	releaseHook := make(chan struct{})
 	allStarted := make(chan struct{})

@@ -73,25 +73,27 @@ type ControlPlaneService struct {
 
 // runtimeConfigAllowedFields is the set of JSON field names that can be patched.
 var runtimeConfigAllowedFields = map[string]bool{
-	"request_log_enabled":                      true,
-	"reverse_proxy_log_detail_enabled":         true,
-	"reverse_proxy_log_req_headers_max_bytes":  true,
-	"reverse_proxy_log_req_body_max_bytes":     true,
-	"reverse_proxy_log_resp_headers_max_bytes": true,
-	"reverse_proxy_log_resp_body_max_bytes":    true,
-	"max_consecutive_failures":                 true,
-	"max_latency_test_interval":                true,
-	"max_authority_latency_test_interval":      true,
-	"max_egress_test_interval":                 true,
-	"latency_test_url":                         true,
-	"latency_authorities":                      true,
-	"p2c_latency_window":                       true,
-	"latency_decay_window":                     true,
-	"cache_flush_interval":                     true,
-	"cache_flush_dirty_threshold":              true,
-	"auto_remove_unhealthy_nodes_enabled":      true,
-	"auto_remove_unhealthy_nodes_delay":        true,
-	"auto_delete_empty_subscriptions_enabled":  true,
+	"auto_remove_high_latency_nodes_enabled":      true,
+	"auto_remove_high_latency_nodes_threshold_ms": true,
+	"request_log_enabled":                         true,
+	"reverse_proxy_log_detail_enabled":            true,
+	"reverse_proxy_log_req_headers_max_bytes":     true,
+	"reverse_proxy_log_req_body_max_bytes":        true,
+	"reverse_proxy_log_resp_headers_max_bytes":    true,
+	"reverse_proxy_log_resp_body_max_bytes":       true,
+	"max_consecutive_failures":                    true,
+	"max_latency_test_interval":                   true,
+	"max_authority_latency_test_interval":         true,
+	"max_egress_test_interval":                    true,
+	"latency_test_url":                            true,
+	"latency_authorities":                         true,
+	"p2c_latency_window":                          true,
+	"latency_decay_window":                        true,
+	"cache_flush_interval":                        true,
+	"cache_flush_dirty_threshold":                 true,
+	"auto_remove_unhealthy_nodes_enabled":         true,
+	"auto_remove_unhealthy_nodes_delay":           true,
+	"auto_delete_empty_subscriptions_enabled":     true,
 }
 
 var platformPatchAllowedFields = map[string]bool{
@@ -244,6 +246,9 @@ func validateRuntimeConfig(cfg *config.RuntimeConfig) *ServiceError {
 	}
 	if time.Duration(cfg.AutoRemoveUnhealthyNodesDelay) < 0 {
 		return invalidArg("auto_remove_unhealthy_nodes_delay: must be non-negative")
+	}
+	if cfg.AutoRemoveHighLatencyNodesThresholdMS < 1 || cfg.AutoRemoveHighLatencyNodesThresholdMS > 2147483647 {
+		return invalidArg("auto_remove_high_latency_nodes_threshold_ms: must be between 1 and 2147483647")
 	}
 
 	// LatencyTestURL domain must be in LatencyAuthorities.

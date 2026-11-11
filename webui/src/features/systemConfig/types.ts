@@ -17,6 +17,8 @@ export type RuntimeConfig = {
   cache_flush_dirty_threshold: number;
   auto_remove_unhealthy_nodes_enabled: boolean;
   auto_remove_unhealthy_nodes_delay: string;
+  auto_remove_high_latency_nodes_enabled: boolean;
+  auto_remove_high_latency_nodes_threshold_ms: number;
   auto_delete_empty_subscriptions_enabled: boolean;
 };
 

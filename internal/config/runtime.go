@@ -35,6 +35,9 @@ type RuntimeConfig struct {
 	AutoRemoveUnhealthyNodesEnabled bool     `json:"auto_remove_unhealthy_nodes_enabled"`
 	AutoRemoveUnhealthyNodesDelay   Duration `json:"auto_remove_unhealthy_nodes_delay"`
 
+	AutoRemoveHighLatencyNodesEnabled     bool `json:"auto_remove_high_latency_nodes_enabled"`
+	AutoRemoveHighLatencyNodesThresholdMS int  `json:"auto_remove_high_latency_nodes_threshold_ms"`
+
 	// Delete subscriptions that no longer have any active nodes after auto-removal.
 	AutoDeleteEmptySubscriptionsEnabled bool `json:"auto_delete_empty_subscriptions_enabled"`
 }
@@ -64,8 +67,10 @@ func NewDefaultRuntimeConfig() *RuntimeConfig {
 		CacheFlushInterval:       Duration(5 * time.Minute),
 		CacheFlushDirtyThreshold: 1000,
 
-		AutoRemoveUnhealthyNodesEnabled: false,
-		AutoRemoveUnhealthyNodesDelay:   Duration(72 * time.Hour),
+		AutoRemoveUnhealthyNodesEnabled:       false,
+		AutoRemoveUnhealthyNodesDelay:         Duration(72 * time.Hour),
+		AutoRemoveHighLatencyNodesEnabled:     false,
+		AutoRemoveHighLatencyNodesThresholdMS: 1000,
 
 		AutoDeleteEmptySubscriptionsEnabled: false,
 	}

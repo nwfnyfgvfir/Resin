@@ -4,12 +4,21 @@ import type {
   EgressProbeResult,
   LatencyProbeResult,
   NodeExportText,
+  NodeCleanupMode,
+  NodeCleanupResult,
   NodeListQuery,
   NodeSummary,
   PageResponse,
 } from "./types";
 
 const basePath = "/api/v1/nodes";
+
+export async function cleanupNodes(nodeHashes: string[], mode: NodeCleanupMode, maxLatencyMs: number): Promise<NodeCleanupResult> {
+  return apiRequest<NodeCleanupResult>(`${basePath}:cleanup`, {
+    method: "POST",
+    body: { node_hashes: nodeHashes, mode, max_latency_ms: maxLatencyMs },
+  });
+}
 
 type ApiNodeSummary = Omit<NodeSummary, "tags"> & {
   tags?: NodeSummary["tags"] | null;
