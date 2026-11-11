@@ -40,6 +40,7 @@ func TestAPIContract_SubscriptionCleanupAction_E2E(t *testing.T) {
 		t.Fatalf("missing circuit node %s in pool", circuitHash.Hex())
 	}
 	circuitEntry.CircuitOpenSince.Store(time.Now().Add(-time.Minute).UnixNano())
+	circuitEntry.FailureCount.Store(3)
 
 	noOutboundErrRaw := []byte(`{"type":"ss","server":"2.2.2.2","port":443}`)
 	noOutboundErrHash := node.HashFromRawOptions(noOutboundErrRaw)

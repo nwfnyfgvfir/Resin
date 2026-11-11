@@ -30,6 +30,46 @@ func newCleanupSubscriptionTestService() (*ControlPlaneService, *topology.Subscr
 	return cp, subMgr, pool
 }
 
+func TestCleanupSubscriptionCircuitOpenNodes_KeepsPendingAndOtherSubscriptionReferences(t *testing.T) {
+	cp, mgr, pool := newCleanupSubscriptionTestService()
+	selected := subscription.NewSubscription("selected", "selected", "https://example.com/a", true, false)
+	other := subscription.NewSubscription("other", "other", "https://example.com/b", true, false)
+	mgr.Register(selected)
+	mgr.Register(other)
+	add := func(raw []byte, sub *subscription.Subscription) *node.NodeEntry {
+		h := node.HashFromRawOptions(raw)
+		pool.AddNodeFromSub(h, raw, sub.ID)
+		sub.ManagedNodes().StoreNode(h, subscription.ManagedNode{})
+		entry, _ := pool.GetEntry(h)
+		ob := testutil.NewNoopOutbound()
+		entry.Outbound.Store(&ob)
+		return entry
+	}
+	pending := add([]byte(`{"type":"http","server":"pending.example","server_port":8080}`), selected)
+	healthy := add([]byte(`{"type":"http","server":"healthy.example","server_port":8080}`), selected)
+	healthy.CircuitOpenSince.Store(0)
+	sharedRaw := []byte(`{"type":"http","server":"shared.example","server_port":8080}`)
+	shared := add(sharedRaw, selected)
+	add(sharedRaw, other)
+	shared.FailureCount.Store(3)
+	count, err := cp.CleanupSubscriptionCircuitOpenNodes(selected.ID)
+	if err != nil || count != 1 {
+		t.Fatalf("cleanup count=%d err=%v", count, err)
+	}
+	for _, entry := range []*node.NodeEntry{pending, healthy} {
+		managed, ok := selected.ManagedNodes().LoadNode(entry.Hash)
+		if !ok || managed.Evicted {
+			t.Fatal("pending or healthy node was removed")
+		}
+	}
+	if refs := shared.SubscriptionIDs(); len(refs) != 1 || refs[0] != other.ID {
+		t.Fatalf("unselected subscription reference changed: %v", refs)
+	}
+	if managed, ok := other.ManagedNodes().LoadNode(shared.Hash); !ok || managed.Evicted {
+		t.Fatal("unselected subscription's managed node was removed")
+	}
+}
+
 func TestCleanupSubscriptionCircuitOpenNodes_RemovesCircuitAndOutboundFailureNodes(t *testing.T) {
 	cp, subMgr, pool := newCleanupSubscriptionTestService()
 
@@ -47,6 +87,7 @@ func TestCleanupSubscriptionCircuitOpenNodes_RemovesCircuitAndOutboundFailureNod
 		t.Fatalf("missing circuit node %s in pool", circuitHash.Hex())
 	}
 	circuitEntry.CircuitOpenSince.Store(time.Now().Add(-time.Minute).UnixNano())
+	circuitEntry.FailureCount.Store(3)
 
 	noOutboundErrorRaw := []byte(`{"type":"ss","server":"2.2.2.2","port":443}`)
 	noOutboundErrorHash := node.HashFromRawOptions(noOutboundErrorRaw)
@@ -81,6 +122,7 @@ func TestCleanupSubscriptionCircuitOpenNodes_RemovesCircuitAndOutboundFailureNod
 		t.Fatalf("missing shared node %s in pool", sharedHash.Hex())
 	}
 	sharedEntry.CircuitOpenSince.Store(time.Now().Add(-time.Minute).UnixNano())
+	sharedEntry.FailureCount.Store(3)
 
 	cleanedCount, err := cp.CleanupSubscriptionCircuitOpenNodes(subA.ID)
 	if err != nil {
@@ -153,6 +195,7 @@ func TestCleanupSubscriptionCircuitOpenNodes_SecondConfirmSkipsRecoveredNodes(t 
 		t.Fatalf("missing recovering node %s in pool", recoveredHash.Hex())
 	}
 	recoveredEntry.CircuitOpenSince.Store(time.Now().Add(-time.Minute).UnixNano())
+	recoveredEntry.FailureCount.Store(3)
 
 	failedRaw := []byte(`{"type":"ss","server":"6.6.6.6","port":443}`)
 	failedHash := node.HashFromRawOptions(failedRaw)
@@ -236,6 +279,7 @@ func TestCleanupSubscriptionCircuitOpenNodes_DeletesEmptySubscriptionWhenEnabled
 		t.Fatalf("missing circuit node %s in pool", circuitHash.Hex())
 	}
 	circuitEntry.CircuitOpenSince.Store(time.Now().Add(-time.Minute).UnixNano())
+	circuitEntry.FailureCount.Store(3)
 
 	cleanedCount, err := cp.CleanupSubscriptionCircuitOpenNodes(sub.ID)
 	if err != nil {

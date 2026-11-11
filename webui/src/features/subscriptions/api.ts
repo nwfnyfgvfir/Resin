@@ -104,6 +104,30 @@ export async function cleanupSubscriptionCircuitOpenNodes(id: string): Promise<n
   return data.cleaned_count;
 }
 
+export async function cleanupSubscriptionsCircuitOpenNodes(ids: string[]) {
+  const uniqueIds = Array.from(new Set(ids));
+  const result = {
+    cleanedCount: 0,
+    succeededIds: [] as string[],
+    failures: [] as Array<{ id: string; error: unknown }>,
+  };
+  let nextIndex = 0;
+  // Keep large, cross-page selections from flooding the API with requests.
+  await Promise.all(Array.from({ length: Math.min(4, uniqueIds.length) }, async () => {
+    while (nextIndex < uniqueIds.length) {
+      const id = uniqueIds[nextIndex++];
+      try {
+        const cleanedCount = await cleanupSubscriptionCircuitOpenNodes(id);
+        result.cleanedCount += cleanedCount;
+        result.succeededIds.push(id);
+      } catch (error) {
+        result.failures.push({ id, error });
+      }
+    }
+  }));
+  return result;
+}
+
 export async function exportSubscriptions(): Promise<SubscriptionBackupFile> {
   return apiRequest<SubscriptionBackupFile>(`${basePath}:export`);
 }

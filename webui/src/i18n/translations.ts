@@ -4,6 +4,12 @@ export const APP_TITLE_ZH = "Resin · 高性能粘性代理池";
 const APP_TITLE_EN = "Resin · Sticky Proxy Pool";
 
 const EXACT_ZH_TO_EN: Record<string, string> = {
+  "批量清理失效节点": "Clean Up Failed Nodes",
+  "批量清理失效节点（{{count}}）": "Clean Up Failed Nodes ({{count}})",
+  "清理勾选订阅中的失效节点，保留健康和待测节点": "Remove failed nodes from selected subscriptions, keeping healthy and untested nodes",
+  "确认清理选中的 {{count}} 条订阅中的失效节点？健康和待测节点会保留。": "Remove failed nodes from {{count}} selected subscriptions? Healthy and untested nodes will be kept.",
+  "已清理 {{subscriptions}} 条订阅中的 {{count}} 个失效节点": "Cleaned up {{count}} failed nodes across {{subscriptions}} subscriptions",
+  "已处理 {{success}} 条订阅，清理 {{count}} 个失效节点；{{failed}} 条失败订阅已保留勾选，可重试。": "Processed {{success}} subscriptions and removed {{count}} failed nodes. {{failed}} failed subscriptions remain selected for retry.",
   "节点清理": "Node Cleanup",
   "仅清理选中节点。失效清理保留待测节点，高延迟清理保留无测速数据的节点。": "Cleanup applies to selected nodes only. Failed-node cleanup keeps untested nodes; high latency cleanup keeps nodes without measurements.",
   "取消选择": "Clear Selection",

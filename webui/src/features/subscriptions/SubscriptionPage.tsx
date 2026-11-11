@@ -1,7 +1,7 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createColumnHelper } from "@tanstack/react-table";
-import { AlertTriangle, Download, Eye, Filter, Info, Pencil, Plus, RefreshCw, Search, Sparkles, Trash2, Upload, X } from "lucide-react";
+import { AlertTriangle, Download, Eraser, Eye, Filter, Info, Pencil, Plus, RefreshCw, Search, Sparkles, Trash2, Upload, X } from "lucide-react";
 import { type ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
 import { Link } from "react-router-dom";
@@ -22,6 +22,7 @@ import { formatApiErrorMessage } from "../../lib/error-message";
 import { formatDateTime, formatGoDuration, formatRelativeTime } from "../../lib/time";
 import {
   cleanupSubscriptionCircuitOpenNodes,
+  cleanupSubscriptionsCircuitOpenNodes,
   createSubscription,
   deleteSubscription,
   deleteSubscriptions,
@@ -160,6 +161,7 @@ export function SubscriptionPage() {
   const [selectedSubscriptionIds, setSelectedSubscriptionIds] = useState<Set<string>>(() => new Set());
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [createModalOpen, setCreateModalOpen] = useState(false);
+  const [batchCleanupIds, setBatchCleanupIds] = useState<string[] | null>(null);
   const [pendingRefreshIds, setPendingRefreshIds] = useState<Set<string>>(() => new Set());
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [pendingEnabledStates, setPendingEnabledStates] = useState<ReadonlyMap<string, boolean>>(() => new Map());
@@ -407,7 +409,29 @@ export function SubscriptionPage() {
       showToast("error", formatApiErrorMessage(error, t));
     },
   });
-  const isDeletePending = deleteMutation.isPending || batchDeleteMutation.isPending;
+  const batchCleanupMutation = useMutation({
+    mutationFn: cleanupSubscriptionsCircuitOpenNodes,
+    onSuccess: async ({ cleanedCount, succeededIds, failures }) => {
+      const succeeded = new Set(succeededIds);
+      setSelectedSubscriptionIds((previous) => {
+        const next = new Set([...previous].filter((id) => !succeeded.has(id)));
+        for (const { id } of failures) next.add(id);
+        return next;
+      });
+      await invalidateSubscriptionsAndNodes();
+      if (failures.length) {
+        showToast("error", t("已处理 {{success}} 条订阅，清理 {{count}} 个失效节点；{{failed}} 条失败订阅已保留勾选，可重试。", {
+          success: succeededIds.length, count: cleanedCount, failed: failures.length,
+        }) + " " + formatApiErrorMessage(failures[0].error, t));
+        return;
+      }
+      showToast("success", t("已清理 {{subscriptions}} 条订阅中的 {{count}} 个失效节点", {
+        subscriptions: succeededIds.length, count: cleanedCount,
+      }));
+    },
+    onError: (error) => showToast("error", formatApiErrorMessage(error, t)),
+  });
+  const isDeletePending = deleteMutation.isPending || batchDeleteMutation.isPending || batchCleanupMutation.isPending;
 
   const refreshMutation = useMutation({
     mutationFn: async (subscription: Subscription) => {
@@ -587,6 +611,21 @@ export function SubscriptionPage() {
     await batchDeleteMutation.mutateAsync(ids);
   }, [batchDeleteMutation, selectedSubscriptionIds, t]);
 
+  const handleBatchCleanup = () => {
+    const ids = Array.from(selectedSubscriptionIds);
+    if (!ids.length || batchCleanupMutation.isPending) return;
+    setBatchCleanupIds(ids);
+  };
+
+  useEffect(() => {
+    if (!batchCleanupIds) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setBatchCleanupIds(null);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [batchCleanupIds]);
+
   const handleExport = useCallback(async () => {
     await exportMutation.mutateAsync();
   }, [exportMutation]);
@@ -670,6 +709,7 @@ export function SubscriptionPage() {
             type="checkbox"
             aria-label={t("选择当前页全部订阅")}
             checked={allCurrentPageSelected}
+            disabled={isDeletePending}
             onChange={(event) => toggleCurrentPageSelection(event.target.checked)}
             onClick={(event) => event.stopPropagation()}
           />
@@ -681,6 +721,7 @@ export function SubscriptionPage() {
               type="checkbox"
               aria-label={t("选择订阅 {{name}}", { name: subscription.name })}
               checked={selectedSubscriptionIds.has(subscription.id)}
+              disabled={isDeletePending}
               onChange={(event) => toggleSubscriptionSelection(subscription.id, event.target.checked)}
               onClick={(event) => event.stopPropagation()}
             />
@@ -841,11 +882,11 @@ export function SubscriptionPage() {
 
       <Card className="platform-list-card platform-directory-card">
         <div className="list-card-header">
-          <div>
+          <div style={{ flexShrink: 0 }}>
             <h3>{t("订阅列表")}</h3>
             <p>{t("共 {{count}} 个订阅", { count: totalSubscriptions })}</p>
           </div>
-          <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+          <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
             <label className="subscription-inline-filter" htmlFor="sub-status-filter" style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
               <Filter size={16} />
               <Select
@@ -885,6 +926,18 @@ export function SubscriptionPage() {
                 void handleImportFileChange(event);
               }}
             />
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={handleBatchCleanup}
+              disabled={!selectedCount || isDeletePending || cleanupCircuitOpenNodesMutation.isPending}
+              title={t("清理勾选订阅中的失效节点，保留健康和待测节点")}
+            >
+              <Eraser size={16} />
+              {batchCleanupMutation.isPending ? t("清理中...") : selectedCount
+                ? t("批量清理失效节点（{{count}}）", { count: selectedCount })
+                : t("批量清理失效节点")}
+            </Button>
             <Button
               variant="danger"
               size="sm"
@@ -1209,7 +1262,7 @@ export function SubscriptionPage() {
                     <Button
                       variant="secondary"
                       onClick={() => void handleCleanupCircuitOpenNodes(selectedSubscription)}
-                      disabled={cleanupCircuitOpenNodesMutation.isPending}
+                      disabled={cleanupCircuitOpenNodesMutation.isPending || isDeletePending}
                     >
                       {cleanupCircuitOpenNodesMutation.isPending ? t("清理中...") : t("立即清理")}
                     </Button>
@@ -1230,6 +1283,23 @@ export function SubscriptionPage() {
                   </div>
                 </div>
               </section>
+            </div>
+          </Card>
+        </div>
+      ) : null}
+
+      {batchCleanupIds ? (
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="batch-cleanup-title"
+          onClick={() => setBatchCleanupIds(null)}>
+          <Card className="modal-card" style={{ maxWidth: 520 }} onClick={(event) => event.stopPropagation()}>
+            <h3 id="batch-cleanup-title">{t("批量清理失效节点")}</h3>
+            <p style={{ marginTop: 12 }}>{t("确认清理选中的 {{count}} 条订阅中的失效节点？健康和待测节点会保留。", { count: batchCleanupIds.length })}</p>
+            <div className="detail-actions" style={{ justifyContent: "flex-end", marginTop: 20 }}>
+              <Button variant="secondary" autoFocus onClick={() => setBatchCleanupIds(null)}>{t("取消")}</Button>
+              <Button onClick={() => {
+                batchCleanupMutation.mutate(batchCleanupIds);
+                setBatchCleanupIds(null);
+              }}>{t("立即清理")}</Button>
             </div>
           </Card>
         </div>

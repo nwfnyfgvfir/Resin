@@ -588,8 +588,8 @@ func (s *ControlPlaneService) RefreshSubscription(id string) error {
 }
 
 // CleanupSubscriptionCircuitOpenNodes removes problematic nodes from a subscription.
-// It marks nodes as evicted (while keeping managed hashes) for nodes currently
-// circuit-open, and nodes with no outbound while carrying a non-empty last error.
+// It marks failed nodes as evicted while keeping managed hashes. Nodes waiting
+// for their first successful probe are retained until a failure is recorded.
 func (s *ControlPlaneService) CleanupSubscriptionCircuitOpenNodes(id string) (int, error) {
 	return s.cleanupSubscriptionCircuitOpenNodesWithHook(id, nil)
 }
@@ -663,8 +663,5 @@ func (s *ControlPlaneService) maybeDeleteEmptySubscriptionAfterCleanup(id string
 }
 
 func shouldCleanupSubscriptionNode(entry *node.NodeEntry) bool {
-	if entry == nil {
-		return false
-	}
-	return entry.IsCircuitOpen() || (!entry.HasOutbound() && entry.GetLastError() != "")
+	return node.IsFailedForCleanup(entry)
 }
