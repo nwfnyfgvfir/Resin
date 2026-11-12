@@ -123,6 +123,8 @@ export function NodeCleanupPanel({ selectedHashes, onCleaned, onClearSelection, 
         </div>
       </div>
       <p className="field-hint">{t("超过阈值才会清理。自动清理对所有订阅生效，由服务端持续执行，关闭页面后仍生效。")}</p>
+      <p className="field-hint">{t("自动清理需连续至少 3 次有效测速超标，样本跨度至少 10 分钟；恢复到阈值内、测速失败或设置变更后重新观察。")}</p>
+      <p className="field-hint">{t("重复巡检和历史缓存不计入测速次数。手动清理按当前参考延迟判断。")}</p>
       {!validThreshold && <p className="field-error" role="alert">{t("延迟阈值必须是 1 到 2147483647 之间的整数")}</p>}
       {configQuery.isError && <p className="field-error" role="alert">{formatApiErrorMessage(configQuery.error, t)}</p>}
     </Card>

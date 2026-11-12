@@ -12,7 +12,19 @@ import (
 
 func TestEphemeralCleaner_HighLatencyIsIndependentAndRechecksRecovery(t *testing.T) {
 	mgr := NewSubscriptionManager()
-	pool := NewGlobalNodePool(PoolConfig{MaxLatencyTableEntries: 16, MaxConsecutiveFailures: func() int { return 3 }})
+	enabled := false
+	threshold := 1000
+	revision := uint64(1)
+	policy := func() node.HighLatencyCleanupPolicy {
+		return node.HighLatencyCleanupPolicy{
+			Enabled: enabled, ThresholdMS: threshold, Authorities: []string{"example.com"}, Revision: revision,
+		}
+	}
+	pool := NewGlobalNodePool(PoolConfig{
+		MaxLatencyTableEntries: 16, MaxConsecutiveFailures: func() int { return 3 },
+		LatencyAuthorities:       func() []string { return []string{"example.com"} },
+		HighLatencyCleanupPolicy: policy,
+	})
 	sub := subscription.NewSubscription("regular", "regular", "https://example.com", true, false)
 	mgr.Register(sub)
 	entries := make([]*node.NodeEntry, 0, 4)
@@ -33,10 +45,8 @@ func TestEphemeralCleaner_HighLatencyIsIndependentAndRechecksRecovery(t *testing
 	// A failed regular node must stay while only latency cleanup is enabled.
 	entries[3].CircuitOpenSince.Store(time.Now().Add(-time.Hour).UnixNano())
 	entries[3].FailureCount.Store(3)
-	enabled := false
-	threshold := 1000
 	cleaner := NewEphemeralCleaner(mgr, pool)
-	cleaner.SetHighLatencyPolicy(func() (bool, int, []string) { return enabled, threshold, []string{"example.com"} })
+	cleaner.SetHighLatencyPolicy(policy)
 	evicted := 0
 	cleaner.SetOnNodeEvicted(func(id string, h node.Hash) { evicted++ })
 	cleaner.sweep()
@@ -44,6 +54,14 @@ func TestEphemeralCleaner_HighLatencyIsIndependentAndRechecksRecovery(t *testing
 		t.Fatal("disabled policy removed nodes")
 	}
 	enabled = true
+	seed := func(entry *node.NodeEntry, latency time.Duration) {
+		now := time.Now()
+		for _, age := range []time.Duration{-10 * time.Minute, -5 * time.Minute, 0} {
+			pool.recordLatencyAt(entry.Hash, "example.com", &latency, now.Add(age))
+		}
+	}
+	seed(entries[1], 2*time.Second)
+	seed(entries[2], 3*time.Second)
 	hookCalled := false
 	cleaner.sweepWithHook(func() {
 		hookCalled = true
@@ -59,6 +77,9 @@ func TestEphemeralCleaner_HighLatencyIsIndependentAndRechecksRecovery(t *testing
 		t.Fatal("latency cleanup incorrectly removed a failed node")
 	}
 	threshold = 1
+	revision++
+	seed(entries[0], time.Second)
+	seed(entries[1], 2*time.Second)
 	cleaner.sweep()
 	if pool.Size() != 1 || evicted != 3 {
 		t.Fatal("hot-updated threshold did not take effect")

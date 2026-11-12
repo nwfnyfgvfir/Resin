@@ -4,6 +4,8 @@ export const APP_TITLE_ZH = "Resin · 高性能粘性代理池";
 const APP_TITLE_EN = "Resin · Sticky Proxy Pool";
 
 const EXACT_ZH_TO_EN: Record<string, string> = {
+  "自动清理需连续至少 3 次有效测速超标，样本跨度至少 10 分钟；恢复到阈值内、测速失败或设置变更后重新观察。": "Automatic cleanup requires at least 3 consecutive high latency measurements spanning at least 10 minutes. Recovery, probe failure or a settings change restarts observation.",
+  "重复巡检和历史缓存不计入测速次数。手动清理按当前参考延迟判断。": "Repeated cleaner sweeps and cached history do not count as new measurements. Manual cleanup uses the current reference latency.",
   "批量清理失效节点": "Clean Up Failed Nodes",
   "批量清理失效节点（{{count}}）": "Clean Up Failed Nodes ({{count}})",
   "清理勾选订阅中的失效节点，保留健康和待测节点": "Remove failed nodes from selected subscriptions, keeping healthy and untested nodes",

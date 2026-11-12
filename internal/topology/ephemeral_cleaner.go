@@ -22,7 +22,7 @@ type EphemeralCleaner struct {
 	autoRemoveUnhealthyNodesEnabled func() bool
 	autoRemoveUnhealthyNodesDelay   func() time.Duration
 	autoDeleteEmptySubscriptions    func() bool
-	highLatencyPolicy               func() (enabled bool, thresholdMS int, authorities []string)
+	highLatencyPolicy               func() node.HighLatencyCleanupPolicy
 
 	onEmptySubscription func(subID string)
 
@@ -64,7 +64,7 @@ func (c *EphemeralCleaner) SetAutoDeleteEmptySubscriptions(enabled func() bool) 
 }
 
 // SetHighLatencyPolicy configures independent, hot-updatable latency cleanup.
-func (c *EphemeralCleaner) SetHighLatencyPolicy(policy func() (bool, int, []string)) {
+func (c *EphemeralCleaner) SetHighLatencyPolicy(policy func() node.HighLatencyCleanupPolicy) {
 	c.highLatencyPolicy = policy
 }
 
@@ -164,8 +164,7 @@ func (c *EphemeralCleaner) sweepOneSubscription(
 					return true
 				}
 				if c.highLatencyPolicy != nil {
-					enabled, thresholdMS, authorities := c.highLatencyPolicy()
-					return enabled && node.ExceedsReferenceLatency(entry, authorities, thresholdMS)
+					return entry.ReadyForHighLatencyCleanup(c.highLatencyPolicy(), time.Unix(0, now))
 				}
 				return false
 			},
@@ -217,8 +216,7 @@ func (c *EphemeralCleaner) highLatencyEnabled() bool {
 	if c.highLatencyPolicy == nil {
 		return false
 	}
-	enabled, _, _ := c.highLatencyPolicy()
-	return enabled
+	return c.highLatencyPolicy().Enabled
 }
 
 func (c *EphemeralCleaner) globalAutoRemoveEnabled() bool {

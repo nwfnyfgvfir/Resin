@@ -571,6 +571,7 @@ export function SystemConfigPage() {
                   </div>
                 </div>
                 <p className="field-hint">{t("自动清理按参考延迟判断，超过阈值才会清理；没有延迟数据的节点会保留。")}</p>
+                <p className="field-hint">{t("自动清理需连续至少 3 次有效测速超标，样本跨度至少 10 分钟；恢复到阈值内、测速失败或设置变更后重新观察。")}</p>
                 <p className="field-hint" style={{ marginTop: "8px" }}>
                   {t("启用后，所有非临时订阅中持续熔断或出站构建失败的节点会在延迟到期后被自动删除。临时订阅仍使用各自的驱逐延迟。")}
                 </p>

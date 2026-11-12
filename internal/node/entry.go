@@ -54,7 +54,8 @@ type NodeEntry struct {
 	LastLatencyProbeAttempt          atomic.Int64
 	LastAuthorityLatencyProbeAttempt atomic.Int64
 	LastEgressUpdateAttempt          atomic.Int64
-	LatencyTable                     *LatencyTable // per-domain latency stats; nil if not initialized
+	LatencyTable                     *LatencyTable       // per-domain latency stats; nil if not initialized
+	highLatencyEvidence              highLatencyEvidence // transient; requires new samples after restart
 
 	// Outbound instance for this node.
 	Outbound atomic.Pointer[adapter.Outbound]

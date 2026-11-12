@@ -209,6 +209,7 @@ func newTopologyRuntime(
 	onNodeRemoved func(node.Hash),
 ) (*topologyRuntime, error) {
 	subManager := topology.NewSubscriptionManager()
+	highLatencyPolicy := newHighLatencyCleanupPolicyProvider(runtimeCfg)
 
 	pool := topology.NewGlobalNodePool(topology.PoolConfig{
 		SubLookup: subManager.Lookup,
@@ -236,6 +237,7 @@ func newTopologyRuntime(
 		LatencyAuthorities: func() []string {
 			return runtimeConfigSnapshot(runtimeCfg).LatencyAuthorities
 		},
+		HighLatencyCleanupPolicy: highLatencyPolicy,
 	})
 	log.Println("Topology: GlobalNodePool initialized")
 
@@ -330,10 +332,7 @@ func newTopologyRuntime(
 	ephemeralCleaner.SetAutoDeleteEmptySubscriptions(func() bool {
 		return runtimeConfigSnapshot(runtimeCfg).AutoDeleteEmptySubscriptionsEnabled
 	})
-	ephemeralCleaner.SetHighLatencyPolicy(func() (bool, int, []string) {
-		cfg := runtimeConfigSnapshot(runtimeCfg)
-		return cfg.AutoRemoveHighLatencyNodesEnabled, cfg.AutoRemoveHighLatencyNodesThresholdMS, cfg.LatencyAuthorities
-	})
+	ephemeralCleaner.SetHighLatencyPolicy(highLatencyPolicy)
 	ephemeralCleaner.SetOnNodeEvicted(func(subID string, hash node.Hash) {
 		engine.MarkSubscriptionNode(subID, hash.Hex())
 	})

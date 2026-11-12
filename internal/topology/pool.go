@@ -46,25 +46,27 @@ type GlobalNodePool struct {
 	onNodeLatencyChanged func(hash node.Hash, domain string) // fired on latency upserts and evictions
 
 	// Health config
-	maxLatencyTableEntries int
-	maxConsecutiveFailures func() int
-	latencyDecayWindow     func() time.Duration
-	latencyAuthorities     func() []string
+	maxLatencyTableEntries   int
+	maxConsecutiveFailures   func() int
+	latencyDecayWindow       func() time.Duration
+	latencyAuthorities       func() []string
+	highLatencyCleanupPolicy func() node.HighLatencyCleanupPolicy
 }
 
 // PoolConfig configures the GlobalNodePool.
 type PoolConfig struct {
-	SubLookup              func(subID string) *subscription.Subscription
-	GeoLookup              platform.GeoLookupFunc
-	OnNodeAdded            func(hash node.Hash)
-	OnNodeRemoved          func(hash node.Hash, entry *node.NodeEntry)
-	OnSubNodeChanged       func(subID string, hash node.Hash, added bool)
-	OnNodeDynamicChanged   func(hash node.Hash)
-	OnNodeLatencyChanged   func(hash node.Hash, domain string)
-	MaxLatencyTableEntries int
-	MaxConsecutiveFailures func() int
-	LatencyDecayWindow     func() time.Duration
-	LatencyAuthorities     func() []string
+	SubLookup                func(subID string) *subscription.Subscription
+	GeoLookup                platform.GeoLookupFunc
+	OnNodeAdded              func(hash node.Hash)
+	OnNodeRemoved            func(hash node.Hash, entry *node.NodeEntry)
+	OnSubNodeChanged         func(subID string, hash node.Hash, added bool)
+	OnNodeDynamicChanged     func(hash node.Hash)
+	OnNodeLatencyChanged     func(hash node.Hash, domain string)
+	MaxLatencyTableEntries   int
+	MaxConsecutiveFailures   func() int
+	LatencyDecayWindow       func() time.Duration
+	LatencyAuthorities       func() []string
+	HighLatencyCleanupPolicy func() node.HighLatencyCleanupPolicy
 }
 
 var (
@@ -82,20 +84,21 @@ func NewGlobalNodePool(cfg PoolConfig) *GlobalNodePool {
 	}
 
 	return &GlobalNodePool{
-		nodes:                  xsync.NewMap[node.Hash, *node.NodeEntry](),
-		subLookup:              cfg.SubLookup,
-		geoLookup:              cfg.GeoLookup,
-		onNodeAdded:            cfg.OnNodeAdded,
-		onNodeRemoved:          cfg.OnNodeRemoved,
-		onSubNodeChanged:       cfg.OnSubNodeChanged,
-		onNodeDynamicChanged:   cfg.OnNodeDynamicChanged,
-		onNodeLatencyChanged:   cfg.OnNodeLatencyChanged,
-		maxLatencyTableEntries: cfg.MaxLatencyTableEntries,
-		maxConsecutiveFailures: maxConsecutiveFailuresFn,
-		latencyDecayWindow:     cfg.LatencyDecayWindow,
-		latencyAuthorities:     cfg.LatencyAuthorities,
-		platformByID:           make(map[string]*platform.Platform),
-		platformByName:         make(map[string]*platform.Platform),
+		nodes:                    xsync.NewMap[node.Hash, *node.NodeEntry](),
+		subLookup:                cfg.SubLookup,
+		geoLookup:                cfg.GeoLookup,
+		onNodeAdded:              cfg.OnNodeAdded,
+		onNodeRemoved:            cfg.OnNodeRemoved,
+		onSubNodeChanged:         cfg.OnSubNodeChanged,
+		onNodeDynamicChanged:     cfg.OnNodeDynamicChanged,
+		onNodeLatencyChanged:     cfg.OnNodeLatencyChanged,
+		maxLatencyTableEntries:   cfg.MaxLatencyTableEntries,
+		maxConsecutiveFailures:   maxConsecutiveFailuresFn,
+		latencyDecayWindow:       cfg.LatencyDecayWindow,
+		latencyAuthorities:       cfg.LatencyAuthorities,
+		highLatencyCleanupPolicy: cfg.HighLatencyCleanupPolicy,
+		platformByID:             make(map[string]*platform.Platform),
+		platformByName:           make(map[string]*platform.Platform),
 	}
 }
 
@@ -540,6 +543,7 @@ func (p *GlobalNodePool) RecordResult(hash node.Hash, success bool) {
 			circuitStateChanged = true
 		}
 	} else {
+		entry.ResetHighLatencyEvidenceAt(time.Now())
 		newCount := entry.FailureCount.Add(1)
 		dynamicChanged = true
 		maxConsecutiveFailures := p.currentMaxConsecutiveFailures()
@@ -591,6 +595,10 @@ func (p *GlobalNodePool) currentMaxConsecutiveFailures() int {
 // rawTarget is normalized through ExtractDomain (eTLD+1). latency may be nil,
 // which means "attempt only" without latency sample writeback.
 func (p *GlobalNodePool) RecordLatency(hash node.Hash, rawTarget string, latency *time.Duration) {
+	p.recordLatencyAt(hash, rawTarget, latency, time.Now())
+}
+
+func (p *GlobalNodePool) recordLatencyAt(hash node.Hash, rawTarget string, latency *time.Duration, now time.Time) {
 	entry, ok := p.nodes.Load(hash)
 	if !ok {
 		return
@@ -598,7 +606,7 @@ func (p *GlobalNodePool) RecordLatency(hash node.Hash, rawTarget string, latency
 
 	domain := netutil.ExtractDomain(rawTarget)
 	isAuthority := p.isAuthorityDomain(domain)
-	nowNs := time.Now().UnixNano()
+	nowNs := now.UnixNano()
 	entry.LastLatencyProbeAttempt.Store(nowNs)
 	if isAuthority {
 		entry.LastAuthorityLatencyProbeAttempt.Store(nowNs)
@@ -608,6 +616,9 @@ func (p *GlobalNodePool) RecordLatency(hash node.Hash, rawTarget string, latency
 	}
 
 	if latency == nil || *latency <= 0 || entry.LatencyTable == nil {
+		if isAuthority {
+			entry.ResetHighLatencyEvidenceAt(now)
+		}
 		return
 	}
 
@@ -620,6 +631,11 @@ func (p *GlobalNodePool) RecordLatency(hash node.Hash, rawTarget string, latency
 	}
 
 	wasEmpty, evictedDomain, evicted := entry.LatencyTable.UpdateClassified(domain, *latency, decayWindow, isAuthority)
+	if isAuthority && p.highLatencyCleanupPolicy != nil {
+		policy := p.highLatencyCleanupPolicy()
+		entry.ObserveHighLatencySample(policy, latency,
+			policy.Enabled && node.ExceedsReferenceLatency(entry, policy.Authorities, policy.ThresholdMS), now)
+	}
 
 	// If the table transitioned from empty to non-empty, the node might
 	// now satisfy the HasLatency filter — notify platforms.
