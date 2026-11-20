@@ -297,27 +297,28 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	var route routing.RouteResult
 	var hasRoute bool
-	var transport *http.Transport
-	var nodeHashRaw = route.NodeHash
-	domain := netutil.ExtractDomain(parsed.Host)
+	var transport http.RoundTripper
 	if p.bypass != nil && p.bypass.ShouldBypass(parsed.Host) {
 		transport = p.directHTTPTransport()
 	} else {
-		routed, routeErr := resolveRoutedOutbound(p.router, p.pool, parsed.PlatformName, account, parsed.Host)
+		attempts, routeErr := selectOutboundAttempts(p.router, p.pool, parsed.PlatformName, account, parsed.Host)
 		if routeErr != nil {
 			lifecycle.setProxyError(routeErr)
 			lifecycle.setHTTPStatus(routeErr.HTTPCode)
 			writeProxyError(w, routeErr)
 			return
 		}
-		route = routed.Route
-		hasRoute = true
-		nodeHashRaw = route.NodeHash
-		lifecycle.setRouteResult(route)
-		if p.health != nil {
-			go p.health.RecordLatency(nodeHashRaw, domain, nil)
+		transport = &routedHTTPTransport{
+			attempts:           attempts,
+			transport:          p.outboundHTTPTransport,
+			health:             p.health,
+			domain:             netutil.ExtractDomain(parsed.Host),
+			recordHTTPSLatency: true,
+			onRoute: func(result routing.RouteResult) {
+				route, hasRoute = result, true
+				lifecycle.setRouteResult(result)
+			},
 		}
-		transport = p.outboundHTTPTransport(routed)
 	}
 
 	proxy := &httputil.ReverseProxy{
@@ -327,15 +328,7 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			stripForwardingIdentityHeaders(req.Header)
 			pendingEgressHeaderBytes = headerWireLen(req.Header)
 
-			// Compose request-progress trace first so egress commit logic can
-			// observe whether the upstream request was actually written.
 			reqCtx := httptrace.WithClientTrace(req.Context(), upstreamTrace.clientTrace())
-
-			// Add httptrace for TLS latency measurement on HTTPS.
-			if parsed.Protocol == "https" && hasRoute && p.health != nil {
-				reporter := newReverseLatencyReporter(p.health, nodeHashRaw, domain)
-				reqCtx = httptrace.WithClientTrace(reqCtx, reporter.clientTrace())
-			}
 			*req = *req.WithContext(reqCtx)
 		},
 		Transport: transport,
@@ -352,9 +345,6 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			lifecycle.setUpstreamError("reverse_roundtrip", err)
 			lifecycle.setNetOK(false)
 			lifecycle.setHTTPStatus(proxyErr.HTTPCode)
-			if hasRoute {
-				recordPassiveResultAsync(p.health, route, false)
-			}
 			writeProxyError(rw, proxyErr)
 		},
 		ModifyResponse: func(resp *http.Response) error {

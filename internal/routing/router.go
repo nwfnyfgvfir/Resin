@@ -65,6 +65,9 @@ type RouteResult struct {
 	EgressIP     netip.Addr
 	NodeTag      string // display tag: "<Subscription>/<Tag>" (DESIGN.md §601)
 	LeaseCreated bool
+
+	leaseCreatedAtNs int64
+	leaseExpiryNs    int64
 }
 
 const livePickAttempts = 2 // first pick + one retry
@@ -171,6 +174,8 @@ func (r *Router) routeSticky(
 			return newLease, op
 		}
 		result = routeResult
+		result.leaseCreatedAtNs = newLease.CreatedAtNs
+		result.leaseExpiryNs = newLease.ExpiryNs
 		return newLease, op
 	})
 
@@ -211,7 +216,6 @@ func (r *Router) decideStickyLease(
 		account,
 		targetDomain,
 		now,
-		nowNs,
 		current,
 		hadPreviousLease,
 		invalidation,
@@ -224,12 +228,11 @@ func (r *Router) createOrAbortStickyLease(
 	account string,
 	targetDomain string,
 	now time.Time,
-	nowNs int64,
 	previous Lease,
 	hadPreviousLease bool,
 	invalidation leaseInvalidationReason,
 ) (Lease, xsync.ComputeOp, RouteResult, error) {
-	newLease, createdResult, err := r.createLease(plat, state, targetDomain, now, nowNs)
+	newLease, createdResult, err := r.createLease(plat, state, targetDomain, now)
 	if err != nil {
 		r.cleanupPreviousLease(state, previous, hadPreviousLease, invalidation, plat.ID, account)
 		lease, op := abortLeaseCreate(previous, hadPreviousLease)
@@ -237,14 +240,7 @@ func (r *Router) createOrAbortStickyLease(
 	}
 
 	r.cleanupPreviousLease(state, previous, hadPreviousLease, invalidation, plat.ID, account)
-	state.IPLoadStats.Inc(newLease.EgressIP)
-	r.emitLeaseEvent(LeaseEvent{
-		Type:       LeaseCreate,
-		PlatformID: plat.ID,
-		Account:    account,
-		NodeHash:   newLease.NodeHash,
-		EgressIP:   newLease.EgressIP,
-	})
+	r.recordLeaseCreate(state, plat.ID, account, newLease)
 	return newLease, xsync.UpdateOp, createdResult, nil
 }
 
@@ -294,16 +290,7 @@ func (r *Router) tryLeaseSameIPRotation(
 		return Lease{}, RouteResult{}, false
 	}
 
-	newLease := current
-	newLease.NodeHash = bestHash
-	newLease.LastAccessedNs = nowNs
-	r.emitLeaseEvent(LeaseEvent{
-		Type:       LeaseReplace,
-		PlatformID: plat.ID,
-		Account:    account,
-		NodeHash:   bestHash,
-		EgressIP:   current.EgressIP,
-	})
+	newLease := r.replaceLeaseNode(plat.ID, account, current, bestHash, nowNs)
 	return newLease, RouteResult{
 		NodeHash:     bestHash,
 		EgressIP:     current.EgressIP,
@@ -316,29 +303,56 @@ func (r *Router) createLease(
 	state *PlatformRoutingState,
 	targetDomain string,
 	now time.Time,
-	nowNs int64,
 ) (Lease, RouteResult, error) {
 	h, entry, err := r.selectLiveRandomRoute(plat, state.IPLoadStats, targetDomain)
 	if err != nil {
 		return Lease{}, RouteResult{}, err
 	}
-	ttl := plat.StickyTTLNs
-	if ttl <= 0 {
-		ttl = int64(24 * time.Hour) // Default safeguard
-	}
-
-	lease := Lease{
-		NodeHash:       h,
-		EgressIP:       entry.GetEgressIP(),
-		CreatedAtNs:    nowNs,
-		ExpiryNs:       now.Add(time.Duration(ttl)).UnixNano(),
-		LastAccessedNs: nowNs,
-	}
+	lease := newStickyLease(plat, h, entry.GetEgressIP(), now)
 	return lease, RouteResult{
 		NodeHash:     lease.NodeHash,
 		EgressIP:     lease.EgressIP,
 		LeaseCreated: true,
 	}, nil
+}
+
+func newStickyLease(plat *platform.Platform, hash node.Hash, ip netip.Addr, now time.Time) Lease {
+	ttl := time.Duration(plat.StickyTTLNs)
+	if ttl <= 0 {
+		ttl = 24 * time.Hour
+	}
+	nowNs := now.UnixNano()
+	return Lease{
+		NodeHash:       hash,
+		EgressIP:       ip,
+		CreatedAtNs:    nowNs,
+		ExpiryNs:       now.Add(ttl).UnixNano(),
+		LastAccessedNs: nowNs,
+	}
+}
+
+func (r *Router) recordLeaseCreate(state *PlatformRoutingState, platformID, account string, lease Lease) {
+	state.IPLoadStats.Inc(lease.EgressIP)
+	r.emitLeaseEvent(LeaseEvent{
+		Type:       LeaseCreate,
+		PlatformID: platformID,
+		Account:    account,
+		NodeHash:   lease.NodeHash,
+		EgressIP:   lease.EgressIP,
+	})
+}
+
+func (r *Router) replaceLeaseNode(platformID, account string, lease Lease, hash node.Hash, nowNs int64) Lease {
+	lease.NodeHash = hash
+	lease.LastAccessedNs = nowNs
+	r.emitLeaseEvent(LeaseEvent{
+		Type:       LeaseReplace,
+		PlatformID: platformID,
+		Account:    account,
+		NodeHash:   hash,
+		EgressIP:   lease.EgressIP,
+	})
+	return lease
 }
 
 func (r *Router) cleanupPreviousLease(

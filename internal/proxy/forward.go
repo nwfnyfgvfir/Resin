@@ -228,24 +228,27 @@ func (p *ForwardProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	var route routing.RouteResult
 	var hasRoute bool
-	var transport *http.Transport
+	var transport http.RoundTripper
 	if p.bypass != nil && p.bypass.ShouldBypass(r.Host) {
 		transport = p.directHTTPTransport()
 	} else {
-		routed, routeErr := resolveRoutedOutbound(p.router, p.pool, platName, account, r.Host)
+		attempts, routeErr := selectOutboundAttempts(p.router, p.pool, platName, account, r.Host)
 		if routeErr != nil {
 			lifecycle.setProxyError(routeErr)
 			lifecycle.setHTTPStatus(routeErr.HTTPCode)
 			writeProxyError(w, routeErr)
 			return
 		}
-		route = routed.Route
-		hasRoute = true
-		lifecycle.setRouteResult(route)
-		if p.health != nil {
-			go p.health.RecordLatency(route.NodeHash, netutil.ExtractDomain(r.Host), nil)
+		transport = &routedHTTPTransport{
+			attempts:  attempts,
+			transport: p.outboundHTTPTransport,
+			health:    p.health,
+			domain:    netutil.ExtractDomain(r.Host),
+			onRoute: func(result routing.RouteResult) {
+				route, hasRoute = result, true
+				lifecycle.setRouteResult(result)
+			},
 		}
-		transport = p.outboundHTTPTransport(routed)
 	}
 	outReq := prepareForwardOutboundRequest(r)
 	upstreamTrace := newUpstreamRequestTrace(lifecycle.markFirstByteReceived)
@@ -277,9 +280,6 @@ func (p *ForwardProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		lifecycle.setProxyError(proxyErr)
 		lifecycle.setUpstreamError("forward_roundtrip", err)
 		lifecycle.setHTTPStatus(proxyErr.HTTPCode)
-		if hasRoute {
-			recordPassiveResultAsync(p.health, route, false)
-		}
 		writeProxyError(w, proxyErr)
 		return
 	}

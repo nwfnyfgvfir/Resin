@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"sync"
@@ -76,41 +77,54 @@ func prepareConnectTunnel(
 		return prepareDirectConnectTunnel(ctx, deps, target)
 	}
 
-	routed, routeErr := resolveRoutedOutbound(deps.router, deps.pool, platformName, account, target)
+	attempts, routeErr := selectOutboundAttempts(deps.router, deps.pool, platformName, account, target)
 	if routeErr != nil {
 		return tunnelPrepareResult{proxyErr: routeErr}
 	}
 
 	domain := netutil.ExtractDomain(target)
-	nodeHashRaw := routed.Route.NodeHash
-	if deps.health != nil {
-		go deps.health.RecordLatency(nodeHashRaw, domain, nil)
-	}
-
-	rawConn, err := routed.Outbound.DialContext(ctx, "tcp", M.ParseSocksaddr(target))
-	if err != nil {
-		proxyErr := classifyConnectError(err)
-		if proxyErr == nil {
-			return tunnelPrepareResult{
-				route:    routed.Route,
-				canceled: true,
+	destination := M.ParseSocksaddr(target)
+	var lastRoute routing.RouteResult
+	var dialErr error
+	for routed := range attempts.routes(ctx) {
+		lastRoute = routed.Route
+		if deps.health != nil {
+			go deps.health.RecordLatency(lastRoute.NodeHash, domain, nil)
+		}
+		rawConn, err := routed.Outbound.DialContext(ctx, "tcp", destination)
+		if err == nil {
+			if ctx.Err() != nil {
+				_ = rawConn.Close()
+				break
 			}
+			attempts.router.CommitFailover(attempts.account, attempts.first, lastRoute)
+			return prepareRoutedTunnel(deps, lastRoute, rawConn, domain)
 		}
-		if deps.health != nil {
-			recordPassiveResultAsync(deps.health, routed.Route, false)
+		dialErr = err
+		if errors.Is(ctx.Err(), context.Canceled) || errors.Is(err, context.Canceled) {
+			break
 		}
-		return tunnelPrepareResult{
-			route:         routed.Route,
-			proxyErr:      proxyErr,
-			upstreamStage: "connect_dial",
-			upstreamErr:   err,
-		}
+		recordPassiveResultAsync(deps.health, lastRoute, false)
 	}
+	if ctx.Err() != nil {
+		dialErr = ctx.Err()
+	}
+	if dialErr == nil {
+		return tunnelPrepareResult{proxyErr: ErrNoAvailableNodes}
+	}
+	proxyErr := classifyConnectError(dialErr)
+	return tunnelPrepareResult{
+		route:         lastRoute,
+		proxyErr:      proxyErr,
+		upstreamStage: "connect_dial",
+		upstreamErr:   dialErr,
+		canceled:      proxyErr == nil,
+	}
+}
 
+func prepareRoutedTunnel(deps tunnelDeps, route routing.RouteResult, rawConn net.Conn, domain string) tunnelPrepareResult {
 	recordResult := func(ok bool) {
-		if deps.health != nil {
-			recordPassiveResultAsync(deps.health, routed.Route, ok)
-		}
+		recordPassiveResultAsync(deps.health, route, ok)
 	}
 
 	var upstreamBase net.Conn = rawConn
@@ -121,12 +135,12 @@ func prepareConnectTunnel(
 
 	upstreamConn := newTLSLatencyConn(upstreamBase, func(latency time.Duration) {
 		if deps.health != nil {
-			deps.health.RecordLatency(nodeHashRaw, domain, &latency)
+			deps.health.RecordLatency(route.NodeHash, domain, &latency)
 		}
 	})
 
 	return tunnelPrepareResult{
-		route: routed.Route,
+		route: route,
 		session: &preparedTunnel{
 			upstreamConn: upstreamConn,
 			recordResult: recordResult,

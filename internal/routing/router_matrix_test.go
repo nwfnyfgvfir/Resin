@@ -1,6 +1,7 @@
 package routing
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/netip"
@@ -8,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Resinat/Resin/internal/model"
 	"github.com/Resinat/Resin/internal/node"
 	"github.com/Resinat/Resin/internal/platform"
 )
@@ -275,7 +277,7 @@ func TestRouteRequest_SameIPRotationMissRecreatesLease(t *testing.T) {
 		return NewPlatformRoutingState(), false
 	})
 
-	oldExpiry := time.Now().Add(time.Hour).UnixNano()
+	oldExpiry := time.Now().Add(2 * time.Hour).UnixNano()
 	oldLease := Lease{
 		NodeHash:       currentHash,
 		EgressIP:       currentEntry.GetEgressIP(),
@@ -327,6 +329,46 @@ func TestRouteRequest_SameIPRotationMissRecreatesLease(t *testing.T) {
 	}
 	if !foundCreate {
 		t.Fatal("expected LeaseCreate event for recreated lease")
+	}
+}
+
+func TestCommitFailoverPreservesEditedLease(t *testing.T) {
+	pool := newRouterTestPool()
+	plat := platform.NewPlatform("plat-edit", "Plat-Edit", nil, nil)
+	pool.addPlatform(plat)
+	firstHash, firstEntry := newRoutableEntry(t, `{"id":"first"}`, "203.0.113.60")
+	pool.addEntry(firstHash, firstEntry)
+	pool.rebuildPlatformView(plat)
+	router := newTestRouter(pool, nil)
+	const account = "acct"
+	first, err := router.RouteRequest(plat.Name, account, "example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondHash, secondEntry := newRoutableEntry(t, `{"id":"second"}`, "203.0.113.61")
+	pool.addEntry(secondHash, secondEntry)
+	pool.rebuildPlatformView(plat)
+	var alternate RouteResult
+	for route := range router.AlternateRoutes(context.Background(), first, "example.com") {
+		alternate = route
+		break
+	}
+	if alternate.NodeHash != secondHash {
+		t.Fatalf("alternate node = %s, want %s", alternate.NodeHash.Hex(), secondHash.Hex())
+	}
+
+	key := model.LeaseKey{PlatformID: plat.ID, Account: account}
+	edited := router.ReadLease(key)
+	if edited == nil {
+		t.Fatal("missing initial lease")
+	}
+	edited.ExpiryNs += int64(time.Hour)
+	if err := router.UpsertLease(*edited); err != nil {
+		t.Fatal(err)
+	}
+	router.CommitFailover(account, first, alternate)
+	if got := router.ReadLease(key); got == nil || *got != *edited {
+		t.Fatalf("lease changed after an in-flight failover: got %+v, want %+v", got, edited)
 	}
 }
 

@@ -105,6 +105,9 @@ func classifyUpstreamError(err error) *ProxyError {
 	if errors.Is(err, context.Canceled) {
 		return nil
 	}
+	if errors.Is(err, routing.ErrNoAvailableNodes) {
+		return ErrNoAvailableNodes
+	}
 	// Timeout (context deadline or OS-level).
 	if os.IsTimeout(err) || errors.Is(err, context.DeadlineExceeded) {
 		return ErrUpstreamTimeout

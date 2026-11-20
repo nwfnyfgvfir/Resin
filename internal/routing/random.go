@@ -76,19 +76,23 @@ func randomRoute(
 		}
 	}
 
-	// Determine effective latency for comparison.
-	lat1, lat2 := compareLatencies(h1, h2, pool, targetDomain, authorities, p2cWindow)
-
-	// Calculate scores.
-	s1 := calculateScore(h1, lat1, plat, stats, pool)
-	s2 := calculateScore(h2, lat2, plat, stats, pool)
-
-	// Lower score is better.
-	selected := h2 // favor h2 on tie
-	if s1 < s2 {
-		selected = h1
+	if preferRoute(h1, h2, plat, stats, pool, targetDomain, authorities, p2cWindow) {
+		return h1, nil
 	}
-	return selected, nil
+	return h2, nil
+}
+
+func preferRoute(
+	h1, h2 node.Hash,
+	plat *platform.Platform,
+	stats *IPLoadStats,
+	pool PoolAccessor,
+	target string,
+	authorities []string,
+	window time.Duration,
+) bool {
+	lat1, lat2 := compareLatencies(h1, h2, pool, target, authorities, window)
+	return calculateScore(h1, lat1, plat, stats, pool) < calculateScore(h2, lat2, plat, stats, pool)
 }
 
 // compareLatencies determines the latency values for h1 and h2.
