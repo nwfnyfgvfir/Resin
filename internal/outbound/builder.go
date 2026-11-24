@@ -10,6 +10,7 @@ import (
 	"github.com/sagernet/sing-box/adapter/endpoint"
 	"github.com/sagernet/sing-box/adapter/inbound"
 	sbOutbound "github.com/sagernet/sing-box/adapter/outbound"
+	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/dns"
 	"github.com/sagernet/sing-box/include"
 	"github.com/sagernet/sing-box/log"
@@ -133,11 +134,19 @@ func (b *SingboxBuilder) Build(rawOptions json.RawMessage) (adapter.Outbound, er
 	//    typed options via OutboundOptionsRegistry + badjson.UnmarshallExcluded).
 	var outboundConfig option.Outbound
 	if err := sJson.UnmarshalContext(b.ctx, rawOptions, &outboundConfig); err != nil {
+		if outboundConfig.Type == C.TypeWireGuard && hasWireGuardEndpointAddress(rawOptions) {
+			return b.buildWireGuardEndpoint(rawOptions)
+		}
 		return nil, fmt.Errorf("parse outbound options: %w", err)
 	}
 
 	// 2. Create the outbound instance via the registry.
 	logger := b.logFactory.NewLogger("outbound/" + outboundConfig.Type)
+	var wireGuardStartup *wireGuardStartupLogger
+	if options, ok := outboundConfig.Options.(*option.LegacyWireGuardOutboundOptions); ok && !options.SystemInterface {
+		wireGuardStartup = newWireGuardStartupLogger(logger)
+		logger = wireGuardStartup
+	}
 	ob, err := b.registry.CreateOutbound(
 		b.ctx,
 		nil, // router — not needed for simple dialing
@@ -150,14 +159,20 @@ func (b *SingboxBuilder) Build(rawOptions json.RawMessage) (adapter.Outbound, er
 		return nil, fmt.Errorf("create outbound [%s]: %w", outboundConfig.Type, err)
 	}
 
-	// 3. Run lifecycle start stages. On failure, close and return error.
+	return startOutbound(ob, wireGuardStartup)
+}
+
+func startOutbound(ob adapter.Outbound, wireGuardStartup *wireGuardStartupLogger) (adapter.Outbound, error) {
 	for _, stage := range adapter.ListStartStages {
 		if err := adapter.LegacyStart(ob, stage); err != nil {
 			_ = common.Close(ob)
-			return nil, fmt.Errorf("outbound start %s [%s]: %w", stage, outboundConfig.Type, err)
+			return nil, fmt.Errorf("outbound start %s [%s]: %w", stage, ob.Type(), err)
 		}
 	}
 
+	if wireGuardStartup != nil {
+		<-wireGuardStartup.interfaceUpAttempted
+	}
 	return ob, nil
 }
 

@@ -1049,10 +1049,9 @@ a {
 }
 
 .syscfg-checkbox-grid {
-  margin-top: 10px;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
+  gap: 16px;
 }
 
 .syscfg-change-list {
@@ -3160,25 +3159,6 @@ a {
 }
 
 @media (max-width: 1120px) {
-  .app-layout {
-    grid-template-columns: 1fr;
-  }
-
-  .sidebar {
-    position: relative;
-    height: auto;
-    border-right: none;
-    border-bottom: 1px solid var(--border);
-    overflow: visible;
-  }
-
-  .sidebar-main {
-    min-height: auto;
-    overflow: visible;
-    padding-right: 0;
-    margin-right: 0;
-  }
-
   .platform-grid {
     grid-template-columns: 1fr;
   }
@@ -3192,7 +3172,7 @@ a {
   }
 
   .syscfg-layout {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .dashboard-kpi-grid {
@@ -3208,7 +3188,7 @@ a {
   }
 
   .form-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .platform-card-grid {
@@ -3328,12 +3308,6 @@ a {
     font-size: 22px;
   }
 
-  .nav-list {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 6px;
-  }
-
   .platform-detail-toolbar {
     width: 100%;
   }
@@ -3390,7 +3364,7 @@ a {
   }
 
   .syscfg-checkbox-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .dashboard-kpi-grid {
@@ -3610,13 +3584,13 @@ a {
 .node-cleanup-threshold { flex: 0 1 160px; }
 .node-cleanup-actions { gap: 8px; min-height: 40px; }
 .node-cleanup-auto { margin-left: auto; min-height: 40px; font-size: 0.8125rem; }
-.node-cleanup-card > .field-hint {
+.node-cleanup-content > .field-hint {
   margin: 10px 0 0;
   color: var(--text-muted);
   font-size: 0.75rem;
   line-height: 1.5;
 }
-.node-cleanup-card > .field-error { color: var(--danger); font-size: 0.8125rem; margin-top: 8px; }
+.node-cleanup-content > .field-error { color: var(--danger); font-size: 0.8125rem; margin-top: 8px; }
 
 @media (max-width: 720px) {
   .node-cleanup-auto { margin-left: 0; width: 100%; }

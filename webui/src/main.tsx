@@ -13,6 +13,7 @@ import { AppRoutes } from "./app/routes";
 import { AuthUnauthorizedBridge } from "./features/auth/AuthUnauthorizedBridge";
 import "./i18n";
 import "./styles/theme.css";
+import "./styles/responsive.css";
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

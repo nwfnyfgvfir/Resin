@@ -705,32 +705,46 @@ export function SubscriptionPage() {
       col.display({
         id: "select",
         header: () => (
-          <input
-            type="checkbox"
-            aria-label={t("选择当前页全部订阅")}
-            checked={allCurrentPageSelected}
-            disabled={isDeletePending}
-            onChange={(event) => toggleCurrentPageSelection(event.target.checked)}
-            onClick={(event) => event.stopPropagation()}
-          />
+          <label className="table-row-selection">
+            <input
+              type="checkbox"
+              aria-label={t("选择当前页全部订阅")}
+              checked={allCurrentPageSelected}
+              disabled={isDeletePending}
+              onChange={(event) => toggleCurrentPageSelection(event.target.checked)}
+            />
+            <span className="mobile-only">{t("全选本页")}</span>
+          </label>
         ),
         cell: (info) => {
           const subscription = info.row.original;
           return (
-            <input
-              type="checkbox"
-              aria-label={t("选择订阅 {{name}}", { name: subscription.name })}
-              checked={selectedSubscriptionIds.has(subscription.id)}
-              disabled={isDeletePending}
-              onChange={(event) => toggleSubscriptionSelection(subscription.id, event.target.checked)}
-              onClick={(event) => event.stopPropagation()}
-            />
+            <label className="table-row-selection" onClick={(event) => event.stopPropagation()}>
+              <input
+                type="checkbox"
+                aria-label={t("选择订阅 {{name}}", { name: subscription.name })}
+                checked={selectedSubscriptionIds.has(subscription.id)}
+                disabled={isDeletePending}
+                onChange={(event) => toggleSubscriptionSelection(subscription.id, event.target.checked)}
+              />
+            </label>
           );
         },
       }),
       col.accessor("name", {
         header: t("名称"),
-        cell: (info) => <p className="subscriptions-name-cell">{info.getValue()}</p>,
+        cell: (info) => (
+          <button
+            type="button"
+            className="table-record-title subscriptions-name-cell"
+            onClick={(event) => {
+              event.stopPropagation();
+              openDrawer(info.row.original);
+            }}
+          >
+            {info.getValue()}
+          </button>
+        ),
       }),
       col.accessor("url", {
         header: t("订阅源"),
@@ -824,7 +838,7 @@ export function SubscriptionPage() {
               >
                 <Eye size={14} />
               </Link>
-              <Button size="sm" variant="ghost" onClick={() => openDrawer(s)} title={t("编辑")}>
+              <Button size="sm" variant="ghost" onClick={() => openDrawer(s)} title={t("编辑")} aria-label={t("编辑")}>
                 <Pencil size={14} />
               </Button>
               <Button
@@ -833,6 +847,7 @@ export function SubscriptionPage() {
                 onClick={() => void handleRefresh(s)}
                 disabled={isRefreshPending(s.id)}
                 title={t("刷新")}
+                aria-label={t("刷新")}
               >
                 <RefreshCw size={14} />
               </Button>
@@ -842,6 +857,7 @@ export function SubscriptionPage() {
                 onClick={() => void handleDelete(s)}
                 disabled={isDeletePending}
                 title={t("删除")}
+                aria-label={t("删除")}
                 style={{ color: "var(--delete-btn-color, #c27070)" }}
               >
                 <Trash2 size={14} />
@@ -870,7 +886,7 @@ export function SubscriptionPage() {
   );
 
   return (
-    <section className="platform-page">
+    <section className="platform-page subscriptions-page" data-has-selection={selectedCount > 0}>
       <header className="module-header">
         <div>
           <h2>{t("订阅管理")}</h2>
@@ -886,11 +902,27 @@ export function SubscriptionPage() {
             <h3>{t("订阅列表")}</h3>
             <p>{t("共 {{count}} 个订阅", { count: totalSubscriptions })}</p>
           </div>
-          <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
-            <label className="subscription-inline-filter" htmlFor="sub-status-filter" style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+          <div className="subscription-toolbar-controls">
+            <label className="subscription-list-search" htmlFor="subscription-search">
+              <Search size={16} aria-hidden="true" />
+              <Input
+                id="subscription-search"
+                type="search"
+                aria-label={t("搜索订阅")}
+                placeholder={t("搜索")}
+                value={search}
+                onChange={(event) => {
+                  setSearch(event.target.value);
+                  setSelectedSubscriptionIds(new Set());
+                  setPage(0);
+                }}
+              />
+            </label>
+            <label className="subscription-inline-filter subscription-list-filter" htmlFor="sub-status-filter">
               <Filter size={16} />
               <Select
                 id="sub-status-filter"
+                aria-label={t("状态")}
                 value={enabledFilter}
                 onChange={(event) => {
                   setEnabledFilter(event.target.value as EnabledFilter);
@@ -903,20 +935,6 @@ export function SubscriptionPage() {
                 <option value="disabled">{t("仅禁用")}</option>
               </Select>
             </label>
-            <label className="search-box" htmlFor="subscription-search" style={{ maxWidth: 200, margin: 0, gap: 6 }}>
-              <Search size={16} />
-              <Input
-                id="subscription-search"
-                placeholder={t("搜索订阅")}
-                value={search}
-                onChange={(event) => {
-                  setSearch(event.target.value);
-                  setSelectedSubscriptionIds(new Set());
-                  setPage(0);
-                }}
-                style={{ padding: "6px 10px", borderRadius: 8 }}
-              />
-            </label>
             <input
               ref={fileInputRef}
               type="file"
@@ -926,62 +944,47 @@ export function SubscriptionPage() {
                 void handleImportFileChange(event);
               }}
             />
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={handleBatchCleanup}
-              disabled={!selectedCount || isDeletePending || cleanupCircuitOpenNodesMutation.isPending}
-              title={t("清理勾选订阅中的失效节点，保留健康和待测节点")}
-            >
-              <Eraser size={16} />
-              {batchCleanupMutation.isPending ? t("清理中...") : selectedCount
-                ? t("批量清理失效节点（{{count}}）", { count: selectedCount })
-                : t("批量清理失效节点")}
-            </Button>
-            <Button
-              variant="danger"
-              size="sm"
-              onClick={() => void handleBatchDelete()}
-              disabled={!selectedCount || isDeletePending}
-            >
-              <Trash2 size={16} />
-              {selectedCount ? t("删除选中（{{count}}）", { count: selectedCount }) : t("批量删除")}
-            </Button>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => setCreateModalOpen(true)}
-            >
-              <Plus size={16} />
-              {t("新建")}
-            </Button>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => void handleExport()}
-              disabled={exportMutation.isPending}
-            >
-              <Download size={16} />
-              {exportMutation.isPending ? t("导出中...") : t("导出")}
-            </Button>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={handleOpenImport}
-              disabled={importMutation.isPending}
-            >
-              <Upload size={16} />
-              {importMutation.isPending ? t("导入中...") : t("导入")}
-            </Button>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => subscriptionsQuery.refetch()}
-              disabled={subscriptionsQuery.isFetching}
-            >
-              <RefreshCw size={16} className={subscriptionsQuery.isFetching ? "spin" : undefined} />
-              {t("刷新")}
-            </Button>
+            <div className="subscription-batch-actions">
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={handleBatchCleanup}
+                disabled={!selectedCount || isDeletePending || cleanupCircuitOpenNodesMutation.isPending}
+                title={t("清理勾选订阅中的失效节点，保留健康和待测节点")}
+              >
+                <Eraser size={16} />
+                {batchCleanupMutation.isPending ? t("清理中...") : selectedCount
+                  ? t("批量清理失效节点（{{count}}）", { count: selectedCount })
+                  : t("批量清理失效节点")}
+              </Button>
+              <Button
+                variant="danger"
+                size="sm"
+                onClick={() => void handleBatchDelete()}
+                disabled={!selectedCount || isDeletePending}
+              >
+                <Trash2 size={16} />
+                {selectedCount ? t("删除选中（{{count}}）", { count: selectedCount }) : t("批量删除")}
+              </Button>
+            </div>
+            <div className="subscription-list-actions">
+              <Button variant="secondary" size="sm" onClick={() => setCreateModalOpen(true)}>
+                <Plus size={16} />
+                {t("新建")}
+              </Button>
+              <Button variant="secondary" size="sm" onClick={() => void handleExport()} disabled={exportMutation.isPending}>
+                <Download size={16} />
+                {exportMutation.isPending ? t("导出中...") : t("导出")}
+              </Button>
+              <Button variant="secondary" size="sm" onClick={handleOpenImport} disabled={importMutation.isPending}>
+                <Upload size={16} />
+                {importMutation.isPending ? t("导入中...") : t("导入")}
+              </Button>
+              <Button variant="secondary" size="sm" onClick={() => subscriptionsQuery.refetch()} disabled={subscriptionsQuery.isFetching}>
+                <RefreshCw size={16} className={subscriptionsQuery.isFetching ? "spin" : undefined} />
+                {t("刷新")}
+              </Button>
+            </div>
           </div>
         </div>
       </Card>
@@ -1010,6 +1013,7 @@ export function SubscriptionPage() {
             onRowClick={openDrawer}
             getRowId={(s) => s.id}
             className="data-table-subs"
+            compactLabels={{ node_count: t("节点数"), last_updated: t("上次更新"), enabled: t("启用") }}
           />
         ) : null}
 

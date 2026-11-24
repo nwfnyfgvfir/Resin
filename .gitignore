@@ -10,3 +10,15 @@ start-instance.sh
 .omc/
 .local/
 .workbuddy-ai/
+
+# Local Go and web UI tests
+*_test.go
+/coverage.out
+/*.test
+/*.test.exe
+/webui/**/*.test.*
+/webui/**/*.spec.*
+/webui/coverage/
+/webui/playwright-report/
+/webui/test-results/
+/.tmp-tests/

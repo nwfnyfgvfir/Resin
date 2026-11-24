@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createColumnHelper } from "@tanstack/react-table";
-import { AlertTriangle, Copy, Eraser, Globe, RefreshCw, Sparkles, X, Zap } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { AlertTriangle, ArrowDown, ArrowUp, Copy, Eraser, Globe, RefreshCw, SlidersHorizontal, Sparkles, X, Zap } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { Badge } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
@@ -49,20 +49,6 @@ const defaultFilterDraft: NodeFilterDraft = {
 
 const PAGE_SIZE_OPTIONS = [20, 50, 100, 200, 500, 1000, 2000, 5000] as const;
 const EMPTY_PLATFORMS: Platform[] = [];
-const NODE_FILTER_ITEM_STYLE: CSSProperties = {
-  flex: "1 1 120px",
-  minWidth: "80px",
-  display: "flex",
-  flexDirection: "column",
-  gap: "0.25rem",
-};
-const NODE_FILTER_CONTROL_STYLE: CSSProperties = {
-  width: "100%",
-  padding: "4px 8px",
-  fontSize: "0.875rem",
-  minHeight: "32px",
-  height: "32px",
-};
 
 function parseBoolParam(value: string | null): boolean | undefined {
   if (value === null) {
@@ -289,10 +275,11 @@ export function NodesPage() {
   const [activeFilters, setActiveFilters] = useState<NodeListFilters>(() =>
     draftToActiveFilters(draftFromQuery(location.search))
   );
+  const [filtersExpanded, setFiltersExpanded] = useState(false);
   const [sortBy, setSortBy] = useState<NodeSortBy>("tag");
   const [sortOrder, setSortOrder] = useState<SortOrder>("asc");
   const [page, setPage] = useState(0);
-  const [pageSize, setPageSize] = useState<number>(200);
+  const [pageSize, setPageSize] = useState(() => window.matchMedia("(max-width: 760px)").matches ? 20 : 200);
   const [selectedNodeHash, setSelectedNodeHash] = useState("");
   const [selectedNodeHashes, setSelectedNodeHashes] = useState<Set<string>>(() => new Set());
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -595,29 +582,51 @@ export function NodesPage() {
   };
 
   const col = createColumnHelper<NodeSummary>();
+  const hasExtraFilters = Boolean(draftFilters.platform_id || draftFilters.subscription_id || draftFilters.egress_ip || draftFilters.status !== "all");
 
   const nodeColumns = [
     col.display({
       id: "select",
       header: () => (
-        <input
-          type="checkbox"
-          aria-label={t("选择当前页全部节点")}
-          checked={allCurrentPageSelected}
-          onChange={(event) => toggleCurrentPageSelection(event.target.checked)}
-          onClick={(event) => event.stopPropagation()}
-        />
+        <div className="record-list-controls">
+          <label className="table-row-selection">
+            <input
+              type="checkbox"
+              aria-label={t("选择当前页全部节点")}
+              checked={allCurrentPageSelected}
+              onChange={(event) => toggleCurrentPageSelection(event.target.checked)}
+            />
+            <span className="mobile-only">{t("全选本页")}</span>
+          </label>
+          <div className="node-sort-controls mobile-only">
+            <Select aria-label={t("排序字段")} value={sortBy} onChange={(event) => changeSort(event.target.value as NodeSortBy)}>
+              <option value="tag">{t("节点名")}</option>
+              <option value="region">{t("区域")}</option>
+              <option value="failure_count">{t("连续失败")}</option>
+              <option value="created_at">{t("创建时间")}</option>
+            </Select>
+            <Button
+              size="sm"
+              variant="secondary"
+              aria-label={t(sortOrder === "asc" ? "切换为降序" : "切换为升序")}
+              onClick={() => changeSort(sortBy)}
+            >
+              {sortOrder === "asc" ? <ArrowUp size={16} /> : <ArrowDown size={16} />}
+            </Button>
+          </div>
+        </div>
       ),
       cell: (info) => {
         const node = info.row.original;
         return (
-          <input
-            type="checkbox"
-            aria-label={t("选择节点 {{name}}", { name: firstTag(node) })}
-            checked={selectedNodeHashes.has(node.node_hash)}
-            onChange={(event) => toggleNodeSelection(node.node_hash, event.target.checked)}
-            onClick={(event) => event.stopPropagation()}
-          />
+          <label className="table-row-selection" onClick={(event) => event.stopPropagation()}>
+            <input
+              type="checkbox"
+              aria-label={t("选择节点 {{name}}", { name: firstTag(node) })}
+              checked={selectedNodeHashes.has(node.node_hash)}
+              onChange={(event) => toggleNodeSelection(node.node_hash, event.target.checked)}
+            />
+          </label>
         );
       },
     }),
@@ -630,9 +639,16 @@ export function NodesPage() {
         </button>
       ),
       cell: (info) => (
-        <div className="nodes-tag-cell">
-          <span title={info.getValue() as string}>{info.getValue() as string}</span>
-        </div>
+        <button
+          type="button"
+          className="table-record-title nodes-tag-cell"
+          onClick={(event) => {
+            event.stopPropagation();
+            openDrawer(info.row.original.node_hash);
+          }}
+        >
+          <span title={info.getValue()}>{info.getValue()}</span>
+        </button>
       ),
     }),
     col.accessor("region", {
@@ -645,7 +661,7 @@ export function NodesPage() {
       cell: (info) => {
         const val = regionToFlag(info.getValue());
         return (
-          <div style={{ maxWidth: "100px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={val}>
+          <div className="node-cell-short" title={val}>
             {val}
           </div>
         );
@@ -656,7 +672,7 @@ export function NodesPage() {
       cell: (info) => {
         const val = info.getValue() || "-";
         return (
-          <div style={{ maxWidth: "100px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={val}>
+          <div className="node-cell-short" title={val}>
             {val}
           </div>
         );
@@ -740,19 +756,23 @@ export function NodesPage() {
               size="sm"
               variant="ghost"
               title={t("触发出口探测")}
+              aria-label={t("触发出口探测")}
               onClick={() => void runProbeEgress(node.node_hash)}
               disabled={isProbePending(node.node_hash, "egress")}
             >
               <Globe size={14} />
+              <span className="mobile-only">{t("出口探测")}</span>
             </Button>
             <Button
               size="sm"
               variant="ghost"
               title={t("触发延迟探测")}
+              aria-label={t("触发延迟探测")}
               onClick={() => void runProbeLatency(node.node_hash)}
               disabled={isProbePending(node.node_hash, "latency")}
             >
               <Zap size={14} />
+              <span className="mobile-only">{t("延迟探测")}</span>
             </Button>
           </div>
         );
@@ -773,22 +793,28 @@ export function NodesPage() {
 
       <Card className="filter-card platform-list-card platform-directory-card">
         <div className="list-card-header">
-          <div>
-            <h3>{t("节点列表")}</h3>
-            <p>{t("共 {{total}} 个节点，{{healthy}} 个健康 IP", { total: nodesPage.total, healthy: nodesPage.unique_healthy_egress_ips })}</p>
+          <div className="node-filter-heading">
+            <div>
+              <h3>{t("节点列表")}</h3>
+              <p>{t("共 {{total}} 个节点，{{healthy}} 个健康 IP", { total: nodesPage.total, healthy: nodesPage.unique_healthy_egress_ips })}</p>
+            </div>
+            <Button
+              size="sm"
+              variant="secondary"
+              className="node-filter-toggle mobile-only"
+              aria-controls="node-extra-filters"
+              aria-expanded={filtersExpanded}
+              data-active={hasExtraFilters}
+              onClick={() => setFiltersExpanded((expanded) => !expanded)}
+            >
+              <SlidersHorizontal size={16} />
+              {t("更多筛选")}
+            </Button>
           </div>
 
-          <div
-            className="nodes-inline-filters"
-            style={{
-              display: "flex",
-              flexWrap: "wrap",
-              gap: "0.5rem",
-              alignItems: "flex-end",
-            }}
-          >
-            <div style={NODE_FILTER_ITEM_STYLE}>
-              <label htmlFor="node-tag-keyword" style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
+          <div className="nodes-inline-filters">
+            <div className="node-filter-field">
+              <label htmlFor="node-tag-keyword">
                 {t("节点名")}
               </label>
               <Input
@@ -796,101 +822,83 @@ export function NodesPage() {
                 value={draftFilters.tag_keyword}
                 onChange={(event) => handleFilterChange("tag_keyword", event.target.value)}
                 placeholder={t("模糊搜索")}
-                style={NODE_FILTER_CONTROL_STYLE}
               />
             </div>
 
-            <div style={NODE_FILTER_ITEM_STYLE}>
-              <label htmlFor="node-platform-id" style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
-                {t("被此平台路由")}
-              </label>
-              <Select
-                id="node-platform-id"
-                value={draftFilters.platform_id}
-                onChange={(event) => handleFilterChange("platform_id", event.target.value)}
-                style={NODE_FILTER_CONTROL_STYLE}
-              >
-                <option value="">{t("无限制")}</option>
-                {platforms.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                  </option>
-                ))}
-              </Select>
+            <div className="node-filter-field">
+              <label htmlFor="node-region">{t("区域")}</label>
+              <RegionSelect id="node-region" value={draftFilters.region} onChange={(code) => handleFilterChange("region", code)} />
             </div>
 
-            <div style={NODE_FILTER_ITEM_STYLE}>
-              <label htmlFor="node-subscription-id" style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
-                {t("来自此订阅")}
-              </label>
-              <Select
-                id="node-subscription-id"
-                value={draftFilters.subscription_id}
-                onChange={(event) => handleFilterChange("subscription_id", event.target.value)}
-                style={NODE_FILTER_CONTROL_STYLE}
-              >
-                <option value="">{t("全部")}</option>
-                {subscriptions.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.name}
-                  </option>
-                ))}
-              </Select>
+            <div id="node-extra-filters" className="node-extra-filters" data-expanded={filtersExpanded}>
+              <div className="node-filter-field">
+                <label htmlFor="node-platform-id">{t("被此平台路由")}</label>
+                <Select
+                  id="node-platform-id"
+                  value={draftFilters.platform_id}
+                  onChange={(event) => handleFilterChange("platform_id", event.target.value)}
+                >
+                  <option value="">{t("无限制")}</option>
+                  {platforms.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                    </option>
+                  ))}
+                </Select>
+              </div>
+
+              <div className="node-filter-field">
+                <label htmlFor="node-subscription-id">{t("来自此订阅")}</label>
+                <Select
+                  id="node-subscription-id"
+                  value={draftFilters.subscription_id}
+                  onChange={(event) => handleFilterChange("subscription_id", event.target.value)}
+                >
+                  <option value="">{t("全部")}</option>
+                  {subscriptions.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name}
+                    </option>
+                  ))}
+                </Select>
+              </div>
+
+              <div className="node-filter-field">
+                <label htmlFor="node-egress-ip">{t("出口 IP")}</label>
+                <Input
+                  id="node-egress-ip"
+                  value={draftFilters.egress_ip}
+                  onChange={(event) => handleFilterChange("egress_ip", event.target.value)}
+                  placeholder="IP / CIDR"
+                />
+              </div>
+
+              <div className="node-filter-field">
+                <label htmlFor="node-status">{t("状态")}</label>
+                <Select
+                  id="node-status"
+                  value={draftFilters.status}
+                  onChange={(event) => handleFilterChange("status", event.target.value)}
+                >
+                  <option value="all">{t("全部")}</option>
+                  <option value="healthy">{t("健康")}</option>
+                  <option value="circuit_open">{t("熔断 / 待测")}</option>
+                  <option value="error">{t("错误")}</option>
+                  <option value="disabled">{t("禁用")}</option>
+                </Select>
+              </div>
             </div>
 
-            <div style={NODE_FILTER_ITEM_STYLE}>
-              <label htmlFor="node-region" style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
-                {t("区域")}
-              </label>
-              <RegionSelect
-                id="node-region"
-                value={draftFilters.region}
-                onChange={(code) => handleFilterChange("region", code)}
-                style={NODE_FILTER_CONTROL_STYLE}
-              />
-            </div>
-
-            <div style={NODE_FILTER_ITEM_STYLE}>
-              <label htmlFor="node-egress-ip" style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
-                {t("出口 IP")}
-              </label>
-              <Input
-                id="node-egress-ip"
-                value={draftFilters.egress_ip}
-                onChange={(event) => handleFilterChange("egress_ip", event.target.value)}
-                placeholder="IP / CIDR"
-                style={NODE_FILTER_CONTROL_STYLE}
-              />
-            </div>
-
-            <div style={NODE_FILTER_ITEM_STYLE}>
-              <label htmlFor="node-status" style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
-                {t("状态")}
-              </label>
-              <Select
-                id="node-status"
-                value={draftFilters.status}
-                onChange={(event) => handleFilterChange("status", event.target.value)}
-                style={NODE_FILTER_CONTROL_STYLE}
-              >
-                <option value="all">{t("全部")}</option>
-                <option value="healthy">{t("健康")}</option>
-                <option value="circuit_open">{t("熔断 / 待测")}</option>
-                <option value="error">{t("错误")}</option>
-                <option value="disabled">{t("禁用")}</option>
-              </Select>
-            </div>
-
-            <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.125rem", marginLeft: "auto" }}>
-              <Button size="sm" variant="secondary" onClick={() => void handleExportSelectedNodes()} disabled={!selectedNodeCount || exportNodesMutation.isPending} style={{ minHeight: "32px", height: "32px", padding: "0 0.75rem", display: "flex", alignItems: "center", gap: "0.25rem" }}>
+            <div className="node-filter-actions">
+              <Button size="sm" variant="secondary" onClick={() => void handleExportSelectedNodes()} disabled={!selectedNodeCount || exportNodesMutation.isPending}>
                 <Copy size={16} />
                 {selectedNodeCount ? t("复制选中（{{count}}）", { count: selectedNodeCount }) : t("复制节点")}
               </Button>
-              <Button size="sm" variant="secondary" onClick={refreshNodes} disabled={nodesQuery.isFetching} style={{ minHeight: "32px", height: "32px", padding: "0 0.75rem", display: "flex", alignItems: "center", gap: "0.25rem" }}>
+              <Button size="sm" variant="secondary" onClick={refreshNodes} disabled={nodesQuery.isFetching}>
                 <RefreshCw size={16} className={nodesQuery.isFetching ? "spin" : undefined} />
                 {t("刷新")}
               </Button>
-              <Button size="sm" variant="secondary" onClick={resetFilters} style={{ minHeight: "32px", height: "32px", padding: "0 0.75rem", display: "flex", alignItems: "center", gap: "0.25rem" }}>
+              <Button size="sm" variant="secondary" onClick={resetFilters}>
                 <Eraser size={16} />
                 {t("重置")}
               </Button>
@@ -934,6 +942,13 @@ export function NodesPage() {
             columns={nodeColumns}
             onRowClick={(node) => openDrawer(node.node_hash)}
             getRowId={(node) => node.node_hash}
+            className="data-table-node-pool"
+            compactLabels={{
+              region: t("区域"),
+              egress_ip: t("出口 IP"),
+              reference_latency_ms: t("参考延迟"),
+              failure_count: t("连续失败"),
+            }}
           />
         ) : null}
 

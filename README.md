@@ -57,10 +57,13 @@
 
 ### 订阅内容格式
 
-- sing-box JSON：`{"outbounds":[...]}` 或原始出站数组 `[...]`。
-- Clash JSON/YAML：`{"proxies":[...]}` 或 YAML `proxies:`。
-- URI 行格式（每行一个节点）：`vmess://`、`vless://`、`trojan://`、`ss://`、`hysteria2://`、`http://`、`https://`、`socks5://`、`socks5h://`。
-  其中 `http://`、`https://`、`socks5://`、`socks5h://` 需使用 `scheme://[user:pass@]host:port` 形式（可选 `#tag`；`https` 额外支持 `sni`/`servername`/`peer` 与 `allowInsecure`/`insecure` 查询参数）。
+- **sing-box JSON** 支持 `outbounds`、用户态 WireGuard `endpoints`、单个节点对象和节点数组。
+- **Xray/V2Ray JSON** 可导入 VMess、VLESS、Trojan、Shadowsocks、HTTP、SOCKS、Hysteria2 及 WireGuard 出站节点。支持带注释的配置、出站数组和单个节点，可读取当前内核支持的传输、TLS 和鉴权字段。
+- **Clash JSON/YAML** 支持 `proxies`、`Proxy`、`proxy`、裸节点列表，以及 `proxy-providers` 中 `type: inline` 的 `payload`。远程 provider 可将其 URL 单独作为订阅源。
+- **Surge 和 Quantumult X** 提取 `[Proxy]`、`[server_local]` 中的可转换节点，也接受 Quantumult X 的裸节点行。
+- **WireGuard 客户端配置** 支持带有 `[Interface]` 和 `[Peer]` 的 `.conf` 文件内容。会提取地址、密钥、对端、MTU 和保活设置。
+- **分享链接** 支持 `ss://`、`vmess://`、`vmess1://`、`vless://`、`trojan://`、`hysteria://`（UDP）、`hysteria2://`、`hy2://`、`anytls://`、`tuic://`（v5）、`wireguard://`、`wg://`、`ssh://`、`http://`、`https://` 和 SOCKS 链接（`socks://`、`socks4://`、`socks4a://`、`socks5://`、`socks5h://`），以及部分 SSD、Netch 和 Telegram 链接。
+  HTTP、HTTPS 和 SOCKS 链接可使用 `scheme://[user:pass@]host:port#tag`。HTTPS 可通过 `sni`、`servername` 或 `peer` 指定服务器名，也支持 `allowInsecure` 或 `insecure` 查询参数。
 - 纯 HTTP 代理行：`IP:PORT` 或 `IP:PORT:USER:PASS`（支持 IPv4 和 IPv6）。
 - Base64 包裹的文本订阅（例如 URI 行或纯文本节点列表）。
 
@@ -68,6 +71,8 @@
 
 - 对于 sing-box JSON/原始 outbounds：`socks`、`http`、`shadowsocks`、`vmess`、`trojan`、`wireguard`、`hysteria`、`vless`、`shadowtls`、`tuic`、`hysteria2`、`anytls`、`ssh`。
 - 对于 Clash 转换：`ss`/`shadowsocks`、`socks`/`socks4`/`socks4a`/`socks5`、`http`、`vmess`、`vless`、`trojan`、`wireguard`/`wg`、`hysteria`、`hysteria2`/`hy2`、`tuic`、`anytls`、`ssh`。
+
+出站需要相应的 sing-box 协议和传输支持。WireGuard、Hysteria、TUIC 和 REALITY 依赖对应的编译选项。SSR、Snell、Naive 出站及 XHTTP、mKCP 传输超出当前内核的可用范围。
 
 ## 🚀 快速开始
 

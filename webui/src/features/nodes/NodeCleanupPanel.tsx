@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Eraser, Save } from "lucide-react";
+import { ChevronDown, Eraser, Save } from "lucide-react";
 import { useState } from "react";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
@@ -21,6 +21,7 @@ type Props = {
 export function NodeCleanupPanel({ selectedHashes, onCleaned, onClearSelection, showToast }: Props) {
   const { t } = useI18n();
   const queryClient = useQueryClient();
+  const [expanded, setExpanded] = useState(false);
   const [draft, setDraft] = useState<{ enabled: boolean; threshold: string } | null>(null);
   const configQuery = useQuery({
     queryKey: ["system-config"],
@@ -73,10 +74,22 @@ export function NodeCleanupPanel({ selectedHashes, onCleaned, onClearSelection, 
   };
 
   return (
-    <Card className="node-cleanup-card">
+    <Card className="node-cleanup-card" data-expanded={expanded} data-has-selection={selectedHashes.size > 0}>
       <div className="node-cleanup-heading">
         <div>
           <h3><Eraser size={16} />{t("节点清理")}</h3>
+          <Button
+            className="node-cleanup-toggle mobile-only"
+            variant="secondary"
+            size="sm"
+            aria-expanded={expanded}
+            aria-controls="node-cleanup-content"
+            onClick={() => setExpanded((open) => !open)}
+          >
+            <Eraser size={16} />
+            {t("节点清理")}
+            <ChevronDown size={16} />
+          </Button>
           <p>{t("仅清理选中节点。失效清理保留待测节点，高延迟清理保留无测速数据的节点。")}</p>
         </div>
         <div className="node-cleanup-selection" aria-live="polite">
@@ -86,47 +99,49 @@ export function NodeCleanupPanel({ selectedHashes, onCleaned, onClearSelection, 
           )}
         </div>
       </div>
-      <div className="node-cleanup-controls">
-        <div className="field-group node-cleanup-threshold">
-          <label className="field-label" htmlFor="node-cleanup-threshold">{t("高延迟阈值（ms）")}</label>
-          <Input
-            id="node-cleanup-threshold"
-            type="number"
-            min={1}
-            max={2147483647}
-            step={1}
-            value={form.threshold}
-            invalid={!validThreshold}
-            disabled={cleanupMutation.isPending || saveMutation.isPending}
-            onChange={(event) => setDraft({ ...form, threshold: event.target.value })}
-          />
+      <div id="node-cleanup-content" className="node-cleanup-content">
+        <div className="node-cleanup-controls">
+          <div className="field-group node-cleanup-threshold">
+            <label className="field-label" htmlFor="node-cleanup-threshold">{t("高延迟阈值（ms）")}</label>
+            <Input
+              id="node-cleanup-threshold"
+              type="number"
+              min={1}
+              max={2147483647}
+              step={1}
+              value={form.threshold}
+              invalid={!validThreshold}
+              disabled={cleanupMutation.isPending || saveMutation.isPending}
+              onChange={(event) => setDraft({ ...form, threshold: event.target.value })}
+            />
+          </div>
+          <div className="node-cleanup-actions">
+            <Button size="sm" variant="secondary" disabled={!selectedHashes.size || cleanupMutation.isPending}
+              onClick={() => runCleanup("unhealthy")}>
+              {cleanupMutation.isPending && cleanupMutation.variables?.mode === "unhealthy" ? t("清理中...") : t("清理选中失效节点")}
+            </Button>
+            <Button size="sm" variant="secondary" disabled={!selectedHashes.size || !validThreshold || cleanupMutation.isPending}
+              onClick={() => runCleanup("high_latency")}>
+              {cleanupMutation.isPending && cleanupMutation.variables?.mode === "high_latency" ? t("清理中...") : t("清理选中高延迟节点")}
+            </Button>
+          </div>
+          <div className="node-cleanup-auto">
+            <label htmlFor="node-auto-cleanup">{t("自动清理高延迟节点")}</label>
+            <Switch id="node-auto-cleanup" checked={form.enabled}
+              disabled={!configQuery.data || saveMutation.isPending}
+              onChange={(event) => setDraft({ ...form, enabled: event.target.checked })} />
+            <Button size="sm" variant="secondary" disabled={!configQuery.data || !changed || !validThreshold || saveMutation.isPending}
+              onClick={() => saveMutation.mutate()}>
+              <Save size={14} />{saveMutation.isPending ? t("保存中...") : t("保存设置")}
+            </Button>
+          </div>
         </div>
-        <div className="node-cleanup-actions">
-          <Button size="sm" variant="secondary" disabled={!selectedHashes.size || cleanupMutation.isPending}
-            onClick={() => runCleanup("unhealthy")}>
-            {cleanupMutation.isPending && cleanupMutation.variables?.mode === "unhealthy" ? t("清理中...") : t("清理选中失效节点")}
-          </Button>
-          <Button size="sm" variant="secondary" disabled={!selectedHashes.size || !validThreshold || cleanupMutation.isPending}
-            onClick={() => runCleanup("high_latency")}>
-            {cleanupMutation.isPending && cleanupMutation.variables?.mode === "high_latency" ? t("清理中...") : t("清理选中高延迟节点")}
-          </Button>
-        </div>
-        <div className="node-cleanup-auto">
-          <label htmlFor="node-auto-cleanup">{t("自动清理高延迟节点")}</label>
-          <Switch id="node-auto-cleanup" checked={form.enabled}
-            disabled={!configQuery.data || saveMutation.isPending}
-            onChange={(event) => setDraft({ ...form, enabled: event.target.checked })} />
-          <Button size="sm" variant="secondary" disabled={!configQuery.data || !changed || !validThreshold || saveMutation.isPending}
-            onClick={() => saveMutation.mutate()}>
-            <Save size={14} />{saveMutation.isPending ? t("保存中...") : t("保存设置")}
-          </Button>
-        </div>
+        <p className="field-hint">{t("超过阈值才会清理。自动清理对所有订阅生效，由服务端持续执行，关闭页面后仍生效。")}</p>
+        <p className="field-hint">{t("自动清理需连续至少 3 次有效测速超标，样本跨度至少 10 分钟；恢复到阈值内、测速失败或设置变更后重新观察。")}</p>
+        <p className="field-hint">{t("重复巡检和历史缓存不计入测速次数。手动清理按当前参考延迟判断。")}</p>
+        {!validThreshold && <p className="field-error" role="alert">{t("延迟阈值必须是 1 到 2147483647 之间的整数")}</p>}
+        {configQuery.isError && <p className="field-error" role="alert">{formatApiErrorMessage(configQuery.error, t)}</p>}
       </div>
-      <p className="field-hint">{t("超过阈值才会清理。自动清理对所有订阅生效，由服务端持续执行，关闭页面后仍生效。")}</p>
-      <p className="field-hint">{t("自动清理需连续至少 3 次有效测速超标，样本跨度至少 10 分钟；恢复到阈值内、测速失败或设置变更后重新观察。")}</p>
-      <p className="field-hint">{t("重复巡检和历史缓存不计入测速次数。手动清理按当前参考延迟判断。")}</p>
-      {!validThreshold && <p className="field-error" role="alert">{t("延迟阈值必须是 1 到 2147483647 之间的整数")}</p>}
-      {configQuery.isError && <p className="field-error" role="alert">{formatApiErrorMessage(configQuery.error, t)}</p>}
     </Card>
   );
 }

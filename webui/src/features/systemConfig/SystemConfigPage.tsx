@@ -515,7 +515,7 @@ export function SystemConfigPage() {
                     />
                   </div>
                 </div>
-                <div className="syscfg-checkbox-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px", marginTop: "16px" }}>
+                <div className="syscfg-checkbox-grid" style={{ marginTop: "16px" }}>
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", background: "var(--surface-sunken, rgba(0,0,0,0.02))", padding: "12px 16px", borderRadius: "8px", border: "1px solid var(--border)" }}>
                     <div style={{ display: "flex", alignItems: "center" }}>
                       <span className="field-label" style={{ margin: 0, fontWeight: 500 }}>{t("自动删除不可用节点")}</span>
@@ -582,7 +582,7 @@ export function SystemConfigPage() {
 
               <section className="syscfg-section">
                 <h4>{t("请求日志")}</h4>
-                <div className="syscfg-checkbox-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px" }}>
+                <div className="syscfg-checkbox-grid">
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", background: "var(--surface-sunken, rgba(0,0,0,0.02))", padding: "12px 16px", borderRadius: "8px", border: "1px solid var(--border)" }}>
                     <div style={{ display: "flex", alignItems: "center" }}>
                       <span className="field-label" style={{ margin: 0, fontWeight: 500 }}>{t("启用请求日志")}</span>
@@ -1038,7 +1038,7 @@ export function SystemConfigPage() {
 
                 <section className="syscfg-section">
                   <h4>{t("服务鉴权状态")}</h4>
-                  <div className="syscfg-checkbox-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px" }}>
+                  <div className="syscfg-checkbox-grid">
                     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", background: "var(--surface-sunken, rgba(0,0,0,0.02))", padding: "12px 16px", borderRadius: "8px", border: "1px solid var(--border)", opacity: 0.7 }}>
                       <span className="field-label" style={{ margin: 0, fontWeight: 500 }}>{t("已配置管理端令牌")}</span>
                       <Switch checked={envBaseline.admin_token_set} disabled />

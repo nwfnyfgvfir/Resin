@@ -41,15 +41,11 @@ type ParsedNode struct {
 	RawOptions json.RawMessage // full outbound JSON (including tag)
 }
 
-// subscriptionResponse is the top-level structure of a sing-box subscription.
-type subscriptionResponse struct {
-	Outbounds []json.RawMessage `json:"outbounds"`
-}
-
 // outboundHeader extracts just the type and tag from an outbound entry.
 type outboundHeader struct {
-	Type string `json:"type"`
-	Tag  string `json:"tag"`
+	Type     string `json:"type"`
+	Tag      string `json:"tag"`
+	Protocol string `json:"protocol"`
 }
 
 type parseAttempt struct {
@@ -66,10 +62,9 @@ func NewGeneralSubscriptionParser() *GeneralSubscriptionParser {
 	return &GeneralSubscriptionParser{}
 }
 
-// ParseGeneralSubscription parses sing-box JSON / Clash JSON|YAML / URI-line
-// subscriptions (vmess/vless/trojan/ss/hysteria2/http/https/socks5/socks5h),
-// plus plain HTTP proxy lines (IP:PORT or IP:PORT:USER:PASS), with optional
-// base64-wrapped content support.
+// ParseGeneralSubscription extracts proxy nodes from sing-box, Clash and Xray
+// documents, Surge and Quantumult X profiles, WireGuard client configurations,
+// share links, and plain HTTP proxy lines. It also accepts Base64-wrapped text.
 func ParseGeneralSubscription(data []byte) ([]ParsedNode, error) {
 	return NewGeneralSubscriptionParser().Parse(data)
 }
@@ -108,18 +103,27 @@ func parseSubscriptionContent(data []byte) (parseAttempt, error) {
 		return parseAttempt{}, nil
 	}
 
-	if looksLikeJSON(trimmed) {
-		nodes, recognized, err := parseJSONSubscription(trimmed)
-		if err != nil {
-			return parseAttempt{}, err
+	if nodes, recognized, err := parseSubscriptionJSON(trimmed); err != nil {
+		// A flow-style Clash YAML list can begin with the same tokens
+		// as a JSON array, but use unquoted keys or values.
+		if trimmed[0] == '[' {
+			if nodes, ok, _ := parseClashYAMLSubscription(string(trimmed)); ok && len(nodes) > 0 {
+				return parseAttempt{nodes: nodes, recognized: true}, nil
+			}
 		}
-		if recognized {
-			return parseAttempt{nodes: nodes, recognized: true}, nil
-		}
+		return parseAttempt{}, err
+	} else if recognized {
+		return parseAttempt{nodes: nodes, recognized: true}, nil
 	}
 
 	text := normalizeTextContent(string(trimmed))
 	if nodes, recognized, err := parseClashYAMLSubscription(text); err != nil {
+		return parseAttempt{}, err
+	} else if recognized {
+		return parseAttempt{nodes: nodes, recognized: true}, nil
+	}
+
+	if nodes, recognized, err := parseWireGuardConf(text); err != nil {
 		return parseAttempt{}, err
 	} else if recognized {
 		return parseAttempt{nodes: nodes, recognized: true}, nil
@@ -142,43 +146,97 @@ func parseJSONSubscription(data []byte) ([]ParsedNode, bool, error) {
 	var obj map[string]json.RawMessage
 	objErr := json.Unmarshal(data, &obj)
 	if objErr == nil {
-		if outboundsRaw, ok := obj["outbounds"]; ok {
-			nodes, err := parseSingboxOutbounds(outboundsRaw)
-			return nodes, true, err
+		if outboundsRaw, hasOutbounds := obj["outbounds"]; hasOutbounds || obj["endpoints"] != nil {
+			var nodes []ParsedNode
+			var hasXray bool
+			if hasOutbounds {
+				outbounds, xray, err := parseJSONOutbounds(outboundsRaw)
+				if err != nil {
+					return nil, true, err
+				}
+				nodes, hasXray = outbounds, xray
+			}
+			if endpointsRaw, ok := obj["endpoints"]; ok {
+				endpoints, err := parseSingboxEndpoints(endpointsRaw)
+				if err != nil {
+					return nil, true, err
+				}
+				nodes = append(nodes, endpoints...)
+			}
+			if hasXray && len(nodes) == 0 {
+				return nil, true, errUnsupportedXrayOutbounds
+			}
+			if hasOutbounds || len(nodes) > 0 {
+				return nodes, true, nil
+			}
 		}
-		if proxiesRaw, ok := obj["proxies"]; ok {
-			nodes, err := parseClashProxiesJSON(proxiesRaw)
-			return nodes, true, err
+
+		var nodes []ParsedNode
+		var hasProxies bool
+		for _, key := range []string{"proxies", "Proxy", "proxy"} {
+			if raw, ok := obj[key]; ok {
+				proxies, err := parseClashProxiesJSON(raw)
+				if err != nil {
+					return nil, true, err
+				}
+				nodes, hasProxies = proxies, true
+				break
+			}
+		}
+		if providersRaw, ok := obj["proxy-providers"]; ok {
+			var providers map[string]clashProxyProvider
+			if err := json.Unmarshal(providersRaw, &providers); err != nil {
+				return nil, true, fmt.Errorf("subscription: unmarshal clash proxy providers: %w", err)
+			}
+			nodes = appendInlineClashProxies(nodes, providers)
+		}
+		if hasProxies || len(nodes) > 0 {
+			return nodes, true, nil
+		}
+		if obj["type"] != nil || obj["protocol"] != nil {
+			nodes, hasXray := appendUnwrappedJSONNodes(nil, data)
+			if hasXray && len(nodes) == 0 {
+				return nil, true, errUnsupportedXrayOutbounds
+			}
+			return nodes, len(nodes) > 0, nil
 		}
 		return nil, false, nil
 	}
 
 	var arr []json.RawMessage
 	if err := json.Unmarshal(data, &arr); err == nil {
-		nodes := parseRawOutbounds(arr)
-		if len(nodes) == 0 {
-			return nil, false, nil
+		nodes := make([]ParsedNode, 0, len(arr))
+		var hasXray bool
+		for _, raw := range arr {
+			var xray bool
+			nodes, xray = appendUnwrappedJSONNodes(nodes, raw)
+			hasXray = hasXray || xray
 		}
-		return nodes, true, nil
+		if hasXray && len(nodes) == 0 {
+			return nil, true, errUnsupportedXrayOutbounds
+		}
+		return nodes, len(nodes) > 0, nil
 	}
 
 	return nil, true, fmt.Errorf("subscription: unmarshal json: %w", objErr)
 }
 
-func parseSingboxOutbounds(raw json.RawMessage) ([]ParsedNode, error) {
-	var resp subscriptionResponse
-	if err := json.Unmarshal(raw, &resp.Outbounds); err != nil {
-		return nil, fmt.Errorf("subscription: unmarshal outbounds: %w", err)
+func parseJSONOutbounds(raw json.RawMessage) ([]ParsedNode, bool, error) {
+	var outbounds []json.RawMessage
+	if err := json.Unmarshal(raw, &outbounds); err != nil {
+		return nil, false, fmt.Errorf("subscription: unmarshal outbounds: %w", err)
 	}
-	return parseRawOutbounds(resp.Outbounds), nil
-}
-
-func parseRawOutbounds(outbounds []json.RawMessage) []ParsedNode {
 	nodes := make([]ParsedNode, 0, len(outbounds))
+	var hasXray bool
 	for _, raw := range outbounds {
 		var header outboundHeader
 		if err := json.Unmarshal(raw, &header); err != nil {
 			// Skip malformed individual outbound — do not fail the entire parse.
+			continue
+		}
+		if header.Type == "" && header.Protocol != "" {
+			hasXray = true
+			nodes = appendXrayOutbounds(nodes, raw)
 			continue
 		}
 		if !supportedOutboundTypes[header.Type] {
@@ -189,7 +247,7 @@ func parseRawOutbounds(outbounds []json.RawMessage) []ParsedNode {
 			RawOptions: json.RawMessage(append([]byte(nil), raw...)),
 		})
 	}
-	return nodes
+	return nodes, hasXray, nil
 }
 
 func parseClashProxiesJSON(raw json.RawMessage) ([]ParsedNode, error) {
@@ -201,14 +259,24 @@ func parseClashProxiesJSON(raw json.RawMessage) ([]ParsedNode, error) {
 }
 
 func parseClashYAMLSubscription(text string) ([]ParsedNode, bool, error) {
-	if !looksLikeClashYAML(text) {
+	if hasClashYAMLSequenceRoot(text) {
+		var proxies []map[string]any
+		if err := yaml.Unmarshal([]byte(text), &proxies); err != nil {
+			return nil, false, nil
+		}
+		nodes := parseClashProxies(proxies)
+		return nodes, len(nodes) > 0, nil
+	}
+	hasProxyList, hasProviders := clashYAMLDocumentKeys(text)
+	if !hasProxyList && !hasProviders {
 		return nil, false, nil
 	}
 
 	var cfg struct {
-		Proxies    []map[string]any `yaml:"proxies"`
-		ProxyUpper []map[string]any `yaml:"Proxy"`
-		ProxyLower []map[string]any `yaml:"proxy"`
+		Proxies        []map[string]any              `yaml:"proxies"`
+		ProxyUpper     []map[string]any              `yaml:"Proxy"`
+		ProxyLower     []map[string]any              `yaml:"proxy"`
+		ProxyProviders map[string]clashProxyProvider `yaml:"proxy-providers"`
 	}
 	if err := yaml.Unmarshal([]byte(text), &cfg); err != nil {
 		return nil, true, fmt.Errorf("subscription: unmarshal clash yaml: %w", err)
@@ -220,7 +288,8 @@ func parseClashYAMLSubscription(text string) ([]ParsedNode, bool, error) {
 	if len(proxies) == 0 && len(cfg.ProxyLower) > 0 {
 		proxies = cfg.ProxyLower
 	}
-	return parseClashProxies(proxies), true, nil
+	nodes := appendInlineClashProxies(parseClashProxies(proxies), cfg.ProxyProviders)
+	return nodes, hasProxyList || len(nodes) > 0, nil
 }
 
 func parseClashProxies(proxies []map[string]any) []ParsedNode {
@@ -242,7 +311,7 @@ const surgeScannerMaxTokenSize = 1024 * 1024
 
 func parseSurgeProxySubscription(text string) ([]ParsedNode, bool, error) {
 	lower := strings.ToLower(text)
-	if !strings.Contains(lower, "[proxy") && !strings.Contains(lower, "[wireguard ") {
+	if !strings.Contains(lower, "[proxy") && !strings.Contains(lower, "[wireguard ") && !strings.Contains(lower, "[server_local") {
 		return nil, false, nil
 	}
 
@@ -260,7 +329,7 @@ func parseSurgeProxySubscription(text string) ([]ParsedNode, bool, error) {
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") || strings.HasPrefix(line, "//") {
 			continue
 		}
 		if strings.HasPrefix(line, "[") && strings.Contains(line, "]") {
@@ -269,7 +338,7 @@ func parseSurgeProxySubscription(text string) ([]ParsedNode, bool, error) {
 			currentSection = ""
 			currentWGTarget = ""
 			switch {
-			case sectionLower == "proxy":
+			case sectionLower == "proxy", sectionLower == "server_local":
 				currentSection = "proxy"
 			case strings.HasPrefix(sectionLower, "wireguard "):
 				wgName := strings.TrimSpace(sectionTitle[len("WireGuard "):])
@@ -1947,6 +2016,11 @@ func parseURILineSubscription(text string) ([]ParsedNode, bool) {
 		case strings.HasPrefix(lower, "hy2://"):
 			recognized = true
 			node, ok = parseHysteria2URI(line)
+		case strings.HasPrefix(lower, "hysteria://"), strings.HasPrefix(lower, "anytls://"),
+			strings.HasPrefix(lower, "tuic://"), strings.HasPrefix(lower, "ssh://"),
+			strings.HasPrefix(lower, "wireguard://"), strings.HasPrefix(lower, "wg://"):
+			node, ok = parseExtendedProxyURI(line)
+			recognized = recognized || ok
 		case strings.HasPrefix(lower, "ssd://"):
 			recognized = true
 			extraNode, ok = parseSSDURI(line)
@@ -1966,6 +2040,9 @@ func parseURILineSubscription(text string) ([]ParsedNode, bool) {
 		case strings.HasPrefix(lower, "netch://"):
 			recognized = true
 			node, ok = parseNetchURI(line)
+		case strings.HasPrefix(lower, "socks4://"), strings.HasPrefix(lower, "socks4a://"):
+			node, ok = parseProxyURI(line)
+			recognized = recognized || ok
 		case strings.HasPrefix(lower, "http://"),
 			strings.HasPrefix(lower, "https://"),
 			strings.HasPrefix(lower, "socks5://"),
@@ -1973,7 +2050,10 @@ func parseURILineSubscription(text string) ([]ParsedNode, bool) {
 			recognized = true
 			node, ok = parseProxyURI(line)
 		default:
-			node, ok = parsePlainHTTPProxyLine(line)
+			node, ok = parseQuantumultProxyLine(line)
+			if !ok {
+				node, ok = parsePlainHTTPProxyLine(line)
+			}
 			if ok {
 				recognized = true
 			}
@@ -1987,6 +2067,22 @@ func parseURILineSubscription(text string) ([]ParsedNode, bool) {
 		}
 	}
 	return nodes, recognized
+}
+
+func parseQuantumultProxyLine(line string) (ParsedNode, bool) {
+	name, body, ok := strings.Cut(line, "=")
+	if !ok {
+		return ParsedNode{}, false
+	}
+	name = strings.ToLower(strings.TrimSpace(name))
+	switch name {
+	case "shadowsocks", "vmess", "trojan", "http":
+		proxy, ok := parseSurgeQXProxyLine(name, splitCommaRespectQuotes(body))
+		if ok {
+			return convertClashProxyToNode(proxy)
+		}
+	}
+	return ParsedNode{}, false
 }
 
 func parsePlainHTTPProxyLine(line string) (ParsedNode, bool) {
@@ -2025,9 +2121,7 @@ func parseProxyURI(uri string) (ParsedNode, bool) {
 		nodeType = "http"
 	case "https":
 		nodeType = "http"
-	case "socks":
-		nodeType = "socks"
-	case "socks5", "socks5h":
+	case "socks", "socks4", "socks4a", "socks5", "socks5h":
 		nodeType = "socks"
 	default:
 		return ParsedNode{}, false
@@ -2056,7 +2150,12 @@ func parseProxyURI(uri string) (ParsedNode, bool) {
 		}
 	}
 
-	if scheme == "https" {
+	switch scheme {
+	case "socks4":
+		outbound["version"] = "4"
+	case "socks4a":
+		outbound["version"] = "4a"
+	case "https":
 		query := u.Query()
 		if !hasOnlyAllowedQueryKeys(query, "sni", "servername", "peer", "allowInsecure", "insecure") {
 			return ParsedNode{}, false
@@ -3865,14 +3964,34 @@ func looksLikeJSON(data []byte) bool {
 	}
 }
 
-func looksLikeClashYAML(text string) bool {
+func hasClashYAMLSequenceRoot(text string) bool {
+	for line := range strings.SplitSeq(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || line == "---" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if line == "-" || strings.HasPrefix(line, "- ") || line == "[" {
+			return true
+		}
+		if suffix, ok := strings.CutPrefix(line, "["); ok {
+			return strings.HasPrefix(strings.TrimSpace(suffix), "{")
+		}
+		return false
+	}
+	return false
+}
+
+func clashYAMLDocumentKeys(text string) (hasProxies, hasProviders bool) {
 	lower := strings.ToLower(text)
-	return strings.HasPrefix(lower, "proxies:") ||
+	hasProxies = strings.HasPrefix(lower, "proxies:") ||
 		strings.Contains(lower, "\nproxies:") ||
 		strings.HasPrefix(lower, "proxy:") ||
 		strings.Contains(lower, "\nproxy:") ||
 		strings.HasPrefix(lower, "proxy-groups:") ||
 		strings.Contains(lower, "\nproxy-groups:")
+	hasProviders = strings.HasPrefix(lower, "proxy-providers:") ||
+		strings.Contains(lower, "\nproxy-providers:")
+	return hasProxies, hasProviders
 }
 
 func setTLSFromClash(outbound map[string]any, proxy map[string]any, key string) {

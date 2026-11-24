@@ -1,5 +1,5 @@
 import { ChevronDown, X } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Input } from "../../components/ui/Input";
 import { useI18n } from "../../i18n";
 import { getAllRegions } from "./regions";
@@ -8,10 +8,9 @@ type Props = {
   id: string;
   value: string;
   onChange: (code: string) => void;
-  style?: CSSProperties;
 };
 
-export function RegionSelect({ id, value, onChange, style }: Props) {
+export function RegionSelect({ id, value, onChange }: Props) {
   const { t, locale } = useI18n();
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -57,7 +56,6 @@ export function RegionSelect({ id, value, onChange, style }: Props) {
         aria-activedescendant={open && options.length ? `${id}-option-${currentIndex}` : undefined}
         placeholder={open ? t("搜索区域名称或代码") : t("全部")}
         value={open ? search : selectedName}
-        style={{ ...style, paddingRight: "2rem" }}
         onFocus={() => { setOpen(true); setSearch(""); setActiveIndex(0); }}
         onClick={() => { if (!open) { setOpen(true); setSearch(""); setActiveIndex(0); } }}
         onChange={(event) => { setSearch(event.target.value); setActiveIndex(0); setOpen(true); }}
