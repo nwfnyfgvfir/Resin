@@ -86,7 +86,7 @@ func (p *ReverseProxy) outboundHTTPTransport(routed routedOutbound) *http.Transp
 			p.transportPool = NewOutboundTransportPool(p.transportConfig)
 		}
 	})
-	return p.transportPool.Get(routed.Route.NodeHash, routed.Outbound, p.metricsSink)
+	return p.transportPool.Get(routed.Route.NodeHash, routed.Outbound, p.metricsSink, routed.stalledDials)
 }
 
 func (p *ReverseProxy) directHTTPTransport() *http.Transport {
@@ -314,9 +314,9 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			health:             p.health,
 			domain:             netutil.ExtractDomain(parsed.Host),
 			recordHTTPSLatency: true,
+			lifecycle:          lifecycle,
 			onRoute: func(result routing.RouteResult) {
 				route, hasRoute = result, true
-				lifecycle.setRouteResult(result)
 			},
 		}
 	}

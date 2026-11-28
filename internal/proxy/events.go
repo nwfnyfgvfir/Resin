@@ -68,6 +68,11 @@ type RequestLogEntry struct {
 	IngressBytes        int64  // bytes from upstream to client (header + body)
 	EgressBytes         int64  // bytes from client to upstream (header + body)
 
+	UpstreamFirstByteDurationNs int64 // final outbound attempt to first response byte
+	RetryCount                  int
+	FirstFailureNodeHash        string
+	FirstFailureError           string
+
 	// Optional detail payload (mainly for reverse proxy request logging).
 	ReqHeaders           []byte
 	ReqHeadersLen        int

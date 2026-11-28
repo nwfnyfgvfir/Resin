@@ -17,6 +17,7 @@ type requestLifecycle struct {
 	finished            RequestFinishedEvent
 	log                 RequestLogEntry
 	firstByteDurationNs atomic.Int64
+	upstreamFirstByteNs atomic.Int64
 
 	reqBodyCapture  *payloadCaptureReadCloser
 	respBodyCapture *payloadCaptureReadCloser
@@ -93,6 +94,7 @@ func (l *requestLifecycle) finish() {
 	l.finished.DurationNs = durationNs
 	l.log.DurationNs = durationNs
 	l.log.FirstByteDurationNs = l.firstByteDurationNs.Load()
+	l.log.UpstreamFirstByteDurationNs = l.upstreamFirstByteNs.Load()
 	l.events.EmitRequestFinished(l.finished)
 	l.events.EmitRequestLog(l.log)
 }
@@ -186,4 +188,26 @@ func (l *requestLifecycle) setRouteResult(result routing.RouteResult) {
 	l.log.NodeHash = result.NodeHash.Hex()
 	l.log.NodeTag = result.NodeTag
 	l.log.EgressIP = result.EgressIP.String()
+}
+
+func (l *requestLifecycle) startRouteAttempt(result routing.RouteResult) {
+	if l.log.NodeHash != "" {
+		l.log.RetryCount++
+	}
+	l.setRouteResult(result)
+}
+
+func (l *requestLifecycle) markUpstreamFirstByte(start time.Time) {
+	l.upstreamFirstByteNs.CompareAndSwap(0, max(1, time.Since(start).Nanoseconds()))
+}
+
+func (l *requestLifecycle) recordFirstAttemptFailure(route routing.RouteResult, stage string, err error) {
+	if l.log.FirstFailureNodeHash != "" {
+		return
+	}
+	l.log.FirstFailureNodeHash = route.NodeHash.Hex()
+	l.log.FirstFailureError = stage
+	if detail := summarizeUpstreamError(err); detail.Message != "" {
+		l.log.FirstFailureError = stage + ": " + detail.Message
+	}
 }

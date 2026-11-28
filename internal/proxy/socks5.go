@@ -123,10 +123,8 @@ func (s *Socks5Inbound) ServeConnContext(baseCtx context.Context, conn net.Conn)
 		handshake.platformName,
 		handshake.account,
 		handshake.target,
+		lifecycle,
 	)
-	if prepare.route.PlatformID != "" {
-		lifecycle.setRouteResult(prepare.route)
-	}
 	if prepare.session == nil {
 		if prepare.proxyErr != nil {
 			lifecycle.setProxyError(prepare.proxyErr)
@@ -159,7 +157,7 @@ func (s *Socks5Inbound) ServeConnContext(baseCtx context.Context, conn net.Conn)
 		lifecycle.setUpstreamError(relay.upstreamStage, relay.upstreamErr)
 	}
 	lifecycle.setNetOK(relay.netOK)
-	prepare.session.recordResult(relay.netOK)
+	prepare.session.finish(relay)
 }
 
 func (s *Socks5Inbound) performHandshake(conn net.Conn, reader *bufio.Reader, requireAuthInfo bool) socks5HandshakeResult {

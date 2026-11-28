@@ -75,15 +75,15 @@ func (b *closeTrackingBody) Close() error {
 	return nil
 }
 
-func serveFailoverPOST(env *proxyE2EEnv, kind, upstreamURL string, body io.Reader, events EventEmitter) *httptest.ResponseRecorder {
+func serveFailoverHTTP(env *proxyE2EEnv, kind, method, upstreamURL string, body io.Reader, events EventEmitter) *httptest.ResponseRecorder {
 	w := httptest.NewRecorder()
 	if kind == "reverse" {
 		proxy := NewReverseProxy(ReverseProxyConfig{ProxyToken: "tok", Router: env.router, Pool: env.pool, PlatformLookup: env.pool, Events: events})
 		path := "/tok/plat:" + failoverAccount + "/http/" + strings.TrimPrefix(upstreamURL, "http://") + "/upload"
-		proxy.ServeHTTP(w, httptest.NewRequest(http.MethodPost, path, body))
+		proxy.ServeHTTP(w, httptest.NewRequest(method, path, body))
 	} else {
 		proxy := NewForwardProxy(ForwardProxyConfig{ProxyToken: "tok", Router: env.router, Pool: env.pool, Events: events})
-		req := httptest.NewRequest(http.MethodPost, upstreamURL+"/upload", body)
+		req := httptest.NewRequest(method, upstreamURL+"/upload", body)
 		req.Header.Set("Proxy-Authorization", basicAuth("plat."+failoverAccount, "tok"))
 		proxy.ServeHTTP(w, req)
 	}
@@ -125,7 +125,7 @@ func TestHTTPProxy_FailoverPreservesUnreadBodyAndExit(t *testing.T) {
 			})
 
 			events := newMockEventEmitter()
-			w := serveFailoverPOST(env, kind, upstream.URL, &closeTrackingBody{Reader: strings.NewReader(payload)}, events)
+			w := serveFailoverHTTP(env, kind, http.MethodPost, upstream.URL, &closeTrackingBody{Reader: strings.NewReader(payload)}, events)
 			if w.Code != http.StatusCreated || posts.Load() != 1 {
 				t.Fatalf("status=%d, upstream posts=%d, reply=%q", w.Code, posts.Load(), w.Body.String())
 			}
@@ -174,7 +174,7 @@ func TestHTTPProxy_FailoverDoesNotReplaySentPOST(t *testing.T) {
 				return nil, errors.New("unexpected backup dial")
 			})
 
-			w := serveFailoverPOST(env, kind, upstream.URL, strings.NewReader("record a transaction"), NoOpEventEmitter{})
+			w := serveFailoverHTTP(env, kind, http.MethodPost, upstream.URL, strings.NewReader("record a transaction"), NoOpEventEmitter{})
 			if w.Code != http.StatusBadGateway || posts.Load() != 1 || backupDials.Load() != 0 {
 				t.Fatalf("status=%d, upstream posts=%d, backup dials=%d", w.Code, posts.Load(), backupDials.Load())
 			}
@@ -182,7 +182,152 @@ func TestHTTPProxy_FailoverDoesNotReplaySentPOST(t *testing.T) {
 	}
 }
 
-func TestTunnelFailoverExhaustsOnlyOriginalPlatform(t *testing.T) {
+func TestHTTPProxy_FailoverAfterEmptyResponseOnlyForSafeMethods(t *testing.T) {
+	for _, kind := range []string{"forward", "reverse"} {
+		for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodPost} {
+			t.Run(kind+"/"+method, func(t *testing.T) {
+				env := newProxyE2EEnv(t)
+				first := seedFailoverLease(t, env)
+				const firstHopWait = 20 * time.Millisecond
+				setProxyE2EOutboundDialFunc(t, env, func(context.Context, string, M.Socksaddr) (net.Conn, error) {
+					client, server := net.Pipe()
+					go func() {
+						defer server.Close()
+						if _, err := http.ReadRequest(bufio.NewReader(server)); err == nil {
+							time.Sleep(firstHopWait)
+						}
+					}()
+					return client, nil
+				})
+				upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(http.StatusNoContent)
+				}))
+				defer upstream.Close()
+				winner := addFailoverNode(t, env, "backup", first.EgressIP, time.Millisecond,
+					func(ctx context.Context, network string, dest M.Socksaddr) (net.Conn, error) {
+						return (&net.Dialer{}).DialContext(ctx, network, dest.String())
+					})
+				events := newMockEventEmitter()
+				w := serveFailoverHTTP(env, kind, method, upstream.URL, nil, events)
+				log := <-events.logCh
+				if method == http.MethodPost {
+					if w.Code != http.StatusBadGateway || log.RetryCount != 0 {
+						t.Fatalf("unsafe HTTP request replayed: status=%d retries=%d", w.Code, log.RetryCount)
+					}
+					return
+				}
+				if w.Code != http.StatusNoContent || log.NodeHash != winner.Hex() || log.RetryCount != 1 {
+					t.Fatalf("status=%d log=%+v", w.Code, log)
+				}
+				if log.FirstFailureNodeHash != first.NodeHash || !strings.Contains(log.FirstFailureError, "EOF") {
+					t.Fatalf("missing first failure: %+v", log)
+				}
+				if log.UpstreamFirstByteDurationNs <= 0 ||
+					log.FirstByteDurationNs-log.UpstreamFirstByteDurationNs < int64(firstHopWait) {
+					t.Fatalf("request TTFB=%d final hop TTFB=%d", log.FirstByteDurationNs, log.UpstreamFirstByteDurationNs)
+				}
+			})
+		}
+	}
+}
+
+func TestHTTPProxy_FailoverAfterStaleConnectionAndRedialFailure(t *testing.T) {
+	env := newProxyE2EEnv(t)
+	first := seedFailoverLease(t, env)
+	var primaryDials atomic.Int32
+	setProxyE2EOutboundDialFunc(t, env, func(context.Context, string, M.Socksaddr) (net.Conn, error) {
+		if primaryDials.Add(1) > 1 {
+			return nil, errors.New("primary redial failed")
+		}
+		client, server := net.Pipe()
+		go func() {
+			defer server.Close()
+			reader := bufio.NewReader(server)
+			if _, err := http.ReadRequest(reader); err == nil {
+				_, _ = io.WriteString(server, "HTTP/1.1 204 No Content\r\n\r\n")
+				_, _ = http.ReadRequest(reader)
+			}
+		}()
+		return client, nil
+	})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	backup := addFailoverNode(t, env, "backup", first.EgressIP, time.Millisecond,
+		func(ctx context.Context, network string, dest M.Socksaddr) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, dest.String())
+		})
+	events := newMockEventEmitter()
+	proxy := NewForwardProxy(ForwardProxyConfig{ProxyToken: "tok", Router: env.router, Pool: env.pool, Events: events})
+	for _, wantNode := range []string{first.NodeHash, backup.Hex()} {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, upstream.URL, nil).WithContext(ctx)
+		req.Header.Set("Proxy-Authorization", basicAuth("plat."+failoverAccount, "tok"))
+		proxy.ServeHTTP(w, req)
+		cancel()
+		log := <-events.logCh
+		if w.Code != http.StatusNoContent || log.NodeHash != wantNode {
+			t.Fatalf("status=%d log=%+v, want node %s", w.Code, log, wantNode)
+		}
+		if wantNode == backup.Hex() &&
+			(log.RetryCount != 1 || log.FirstFailureNodeHash != first.NodeHash ||
+				!strings.Contains(log.FirstFailureError, "primary redial failed") || primaryDials.Load() != 2) {
+			t.Fatalf("redial was not followed by failover: dials=%d log=%+v", primaryDials.Load(), log)
+		}
+	}
+}
+
+func TestTunnelEarlyCloseRotatesLeaseWithPassiveCircuitBreakerDisabled(t *testing.T) {
+	for _, requireBidirectional := range []bool{true, false} {
+		t.Run(fmt.Sprintf("requireBidirectional=%t", requireBidirectional), func(t *testing.T) {
+			env := newProxyE2EEnv(t)
+			first := seedFailoverLease(t, env)
+			plat, _ := env.pool.GetPlatform(first.PlatformID)
+			plat.PassiveCircuitBreakerDisabled = true
+
+			const payload = "first request bytes"
+			setProxyE2EOutboundDialFunc(t, env, func(context.Context, string, M.Socksaddr) (net.Conn, error) {
+				client, server := net.Pipe()
+				go func() {
+					defer server.Close()
+					_, _ = io.ReadFull(server, make([]byte, len(payload)))
+				}()
+				return client, nil
+			})
+			backup := addFailoverNode(t, env, "backup", first.EgressIP, time.Millisecond, nil)
+			prepare := prepareConnectTunnel(context.Background(), tunnelDeps{
+				router: env.router, pool: env.pool, health: env.pool,
+			}, "plat", failoverAccount, "example.com:443", nil)
+			if prepare.session == nil {
+				t.Fatalf("tunnel preparation failed: %+v", prepare)
+			}
+			proxyConn, clientConn := net.Pipe()
+			defer clientConn.Close()
+			_ = clientConn.SetDeadline(time.Now().Add(time.Second))
+			// Keep the client write side open while waiting for a response.
+			go func() { _, _ = io.WriteString(clientConn, payload) }()
+			relay := pumpPreparedTunnel(proxyConn, nil, prepare.session, tunnelPumpOptions{
+				requireBidirectionalTraffic: requireBidirectional,
+			})
+			if relay.netOK || !relay.earlyUpstreamFailure || relay.upstreamStage != "connect_no_ingress_traffic" {
+				t.Fatalf("unexpected relay outcome: %+v", relay)
+			}
+			prepare.session.finish(relay)
+			route, err := env.router.RouteRequest("plat", failoverAccount, "example.com")
+			if err != nil || route.NodeHash != backup {
+				t.Fatalf("account did not rotate to same exit: route=%+v err=%v", route, err)
+			}
+			lease := env.router.ReadLease(model.LeaseKey{PlatformID: first.PlatformID, Account: failoverAccount})
+			if lease == nil || lease.ExpiryNs != first.ExpiryNs {
+				t.Fatalf("same exit rotation changed lease expiry: %+v", lease)
+			}
+		})
+	}
+}
+
+func TestTunnelFailoverStaysWithinBudgetAndPlatform(t *testing.T) {
 	env := newProxyE2EEnv(t)
 	first := seedFailoverLease(t, env)
 	plat, _ := env.pool.GetPlatform(first.PlatformID)
@@ -207,20 +352,23 @@ func TestTunnelFailoverExhaustsOnlyOriginalPlatform(t *testing.T) {
 	if outside.View().Size() != 1 {
 		t.Fatal("fixture must contain an available node in the other platform")
 	}
-	result := prepareConnectTunnel(context.Background(), tunnelDeps{router: env.router, pool: env.pool}, "plat", failoverAccount, "example.com:443")
+	health := &mockHealthRecorder{}
+	result := prepareConnectTunnel(context.Background(), tunnelDeps{router: env.router, pool: env.pool, health: health}, "plat", failoverAccount, "example.com:443", nil)
 	if result.proxyErr != ErrUpstreamConnectFailed || result.upstreamErr != dialErr || result.session != nil {
 		t.Fatalf("unexpected result: %+v", result)
 	}
-	if len(dials) != 4 || !slices.Equal(dials[:2], []string{"first", "same"}) {
+	if len(dials) != maxOutboundAttempts || !slices.Equal(dials[:2], []string{"first", "same"}) {
 		t.Fatalf("dial sequence = %v", dials)
 	}
-	slices.Sort(dials[2:])
-	if !slices.Equal(dials[2:], []string{"other", "other2"}) {
+	if dials[2] != "other" && dials[2] != "other2" {
 		t.Fatalf("different exit dials = %v", dials[2:])
 	}
 	lease := env.router.ReadLease(model.LeaseKey{PlatformID: first.PlatformID, Account: failoverAccount})
 	if lease == nil || lease.NodeHash != first.NodeHash || lease.ExpiryNs != first.ExpiryNs {
 		t.Fatalf("failed alternate replaced lease: %+v", lease)
+	}
+	if health.resultCalls.Load() != 0 || health.latencyCalls.Load() != 0 {
+		t.Fatal("ambiguous failures across several exits generated health feedback")
 	}
 }
 
@@ -294,6 +442,10 @@ func TestTunnelFailoverChangesExit(t *testing.T) {
 				}
 			}
 
+			key := model.LeaseKey{PlatformID: first.PlatformID, Account: failoverAccount}
+			if lease := env.router.ReadLease(key); lease == nil || lease.NodeHash != first.NodeHash {
+				t.Fatalf("updated the binding before upstream sent bytes: %+v", lease)
+			}
 			writeAll(t, conn, []byte(payload))
 			if echo := readExactly(t, reader, len(payload)); string(echo) != payload {
 				t.Fatalf("unexpected echo: %q", echo)
@@ -335,8 +487,72 @@ func TestTunnelFailoverStopsOnCancellation(t *testing.T) {
 		t.Error("dialed an alternate after cancellation")
 		return nil, errors.New("unexpected dial")
 	})
-	result := prepareConnectTunnel(ctx, tunnelDeps{router: env.router, pool: env.pool}, "plat", failoverAccount, "example.com:443")
+	result := prepareConnectTunnel(ctx, tunnelDeps{router: env.router, pool: env.pool}, "plat", failoverAccount, "example.com:443", nil)
 	if !result.canceled || result.proxyErr != nil || result.session != nil {
 		t.Fatalf("unexpected canceled result: %+v", result)
 	}
+}
+
+func TestOutboundDialTimeoutStopsAtConnectionAcquisition(t *testing.T) {
+	const budget = 20 * time.Millisecond
+	target := M.ParseSocksaddr("example.com:443")
+	t.Run("blocking dial", func(t *testing.T) {
+		parent, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		ob := &mockOutbound{dialFunc: func(ctx context.Context, _ string, _ M.Socksaddr) (net.Conn, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}}
+		conn, err := dialOutbound(parent, budget, ob, nil, "tcp", target)
+		if conn != nil || !errors.Is(err, context.DeadlineExceeded) || parent.Err() != nil {
+			t.Fatalf("dial budget returned conn=%v err=%v parent err=%v", conn, err, parent.Err())
+		}
+	})
+
+	t.Run("connected stream", func(t *testing.T) {
+		var streamCtx context.Context
+		client, server := net.Pipe()
+		defer server.Close()
+		ob := &mockOutbound{dialFunc: func(ctx context.Context, _ string, _ M.Socksaddr) (net.Conn, error) {
+			streamCtx = ctx
+			return client, nil
+		}}
+		conn, err := dialOutbound(context.Background(), budget, ob, nil, "tcp", target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-streamCtx.Done():
+			t.Fatalf("dial ended the established stream: %v", streamCtx.Err())
+		case <-time.After(2 * budget):
+		}
+		_ = conn.Close()
+		if !errors.Is(streamCtx.Err(), context.Canceled) {
+			t.Fatalf("closing the stream left its context active: %v", streamCtx.Err())
+		}
+	})
+
+	t.Run("outbound ignores cancellation", func(t *testing.T) {
+		var stalled atomic.Int32
+		release := make(chan struct{})
+		client, server := net.Pipe()
+		defer server.Close()
+		ob := &mockOutbound{dialFunc: func(context.Context, string, M.Socksaddr) (net.Conn, error) {
+			select {
+			case <-release:
+			case <-time.After(time.Second):
+			}
+			return client, nil
+		}}
+		conn, err := dialOutbound(context.Background(), budget, ob, &stalled, "tcp", target)
+		pending := stalled.Load()
+		close(release)
+		if conn != nil || !errors.Is(err, context.DeadlineExceeded) || pending != 1 {
+			t.Fatalf("blocked outbound returned conn=%v err=%v stalled=%d", conn, err, pending)
+		}
+		_ = server.SetReadDeadline(time.Now().Add(time.Second))
+		if _, err := server.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+			t.Fatalf("late outbound connection was not closed: %v", err)
+		}
+	})
 }

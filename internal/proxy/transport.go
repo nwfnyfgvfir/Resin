@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/Resinat/Resin/internal/node"
@@ -66,9 +67,10 @@ func (p *OutboundTransportPool) Get(
 	hash node.Hash,
 	ob adapter.Outbound,
 	sink MetricsEventSink,
+	stalled *atomic.Int32,
 ) *http.Transport {
 	transport, _ := p.transports.LoadOrCompute(hash, func() (*http.Transport, bool) {
-		return p.newReusableOutboundTransport(ob, sink), false
+		return p.newReusableOutboundTransport(ob, sink, stalled), false
 	})
 	return transport
 }
@@ -93,10 +95,10 @@ func (p *OutboundTransportPool) CloseAll() {
 	p.transports.Clear()
 }
 
-func (p *OutboundTransportPool) newReusableOutboundTransport(ob adapter.Outbound, sink MetricsEventSink) *http.Transport {
+func (p *OutboundTransportPool) newReusableOutboundTransport(ob adapter.Outbound, sink MetricsEventSink, stalled *atomic.Int32) *http.Transport {
 	return &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			conn, err := ob.DialContext(ctx, network, M.ParseSocksaddr(addr))
+			conn, err := dialOutbound(ctx, outboundDialTimeout, ob, stalled, network, M.ParseSocksaddr(addr))
 			if err != nil {
 				return nil, err
 			}
@@ -111,6 +113,7 @@ func (p *OutboundTransportPool) newReusableOutboundTransport(ob adapter.Outbound
 		MaxIdleConns:        p.config.MaxIdleConns,
 		MaxIdleConnsPerHost: p.config.MaxIdleConnsPerHost,
 		IdleConnTimeout:     p.config.IdleConnTimeout,
+		TLSHandshakeTimeout: outboundDialTimeout,
 	}
 }
 

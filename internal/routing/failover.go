@@ -1,108 +1,134 @@
 package routing
 
 import (
-	"cmp"
 	"context"
 	"iter"
 	"math/rand/v2"
-	"slices"
 	"time"
 
 	"github.com/Resinat/Resin/internal/netutil"
 	"github.com/Resinat/Resin/internal/node"
+	"github.com/Resinat/Resin/internal/platform"
 	"github.com/puzpuzpuz/xsync/v4"
 )
 
-// AlternateRoutes takes one pass over the original platform's routable view.
-// It ranks nodes on the original exit by latency, then uses the platform's
-// allocation policy to choose among the remaining exits without replacement.
-func (r *Router) AlternateRoutes(ctx context.Context, first RouteResult, target string) iter.Seq[RouteResult] {
+// AlternateRoutes prefers a lease another request has already established,
+// then the original exit, then bounded samples from the platform.
+func (r *Router) AlternateRoutes(ctx context.Context, account string, first RouteResult, target string) iter.Seq[RouteResult] {
 	return func(yield func(RouteResult) bool) {
 		plat, ok := r.pool.GetPlatform(first.PlatformID)
-		if !ok || ctx.Err() != nil {
+		if !ok {
 			return
 		}
 		state, ok := r.states.Load(plat.ID)
 		if !ok {
 			return
 		}
-		view := plat.View()
 		domain := netutil.ExtractDomain(target)
-		authorities, window := r.authorities(), r.p2cWindow()
-		type candidate struct {
-			hash       node.Hash
-			latency    time.Duration
-			hasLatency bool
-		}
-		var sameIP []candidate
-		otherIPs := make([]node.Hash, 0, view.Size())
-		view.Range(func(hash node.Hash) bool {
-			if ctx.Err() != nil {
-				return false
+		tried := map[node.Hash]struct{}{first.NodeHash: {}}
+		for ctx.Err() == nil {
+			route, found := r.currentLeaseRoute(plat, state, account, tried)
+			if !found {
+				hash, sameIP := chooseSameIPRotationCandidate(plat, r.pool, first.EgressIP, domain, r.authorities(), r.p2cWindow(), tried)
+				if sameIP {
+					tried[hash] = struct{}{}
+					route, found = r.alternateRoute(plat, hash)
+					found = found && route.EgressIP == first.EgressIP
+				}
 			}
-			if hash == first.NodeHash {
-				return true
+			if !found {
+				route, found = r.pickAlternate(plat, state, domain, tried)
 			}
-			entry, ok := r.pool.GetEntry(hash)
-			if !ok || !entry.IsHealthy() {
-				return true
-			}
-			if entry.GetEgressIP() == first.EgressIP {
-				latency, hasLatency := sameIPCandidateLatency(entry, domain, authorities, window)
-				sameIP = append(sameIP, candidate{hash, latency, hasLatency})
-			} else {
-				otherIPs = append(otherIPs, hash)
-			}
-			return true
-		})
-
-		if ctx.Err() != nil {
-			return
-		}
-		slices.SortStableFunc(sameIP, func(a, b candidate) int {
-			if a.hasLatency == b.hasLatency {
-				return cmp.Compare(a.latency, b.latency)
-			}
-			if a.hasLatency {
-				return -1
-			}
-			return 1
-		})
-		for _, candidate := range sameIP {
-			if ctx.Err() != nil {
+			if !found || ctx.Err() != nil {
 				return
 			}
-			if route, ok := r.alternateRoute(first.PlatformID, candidate.hash); ok {
-				if route.EgressIP != first.EgressIP {
-					otherIPs = append(otherIPs, candidate.hash)
-				} else if !yield(route) {
-					return
-				}
+			if current, ok := r.pool.GetPlatform(plat.ID); !ok || current != plat {
+				return
 			}
-		}
-
-		for len(otherIPs) > 0 && ctx.Err() == nil {
-			n := len(otherIPs)
-			pick := rand.IntN(n)
-			if n > 1 {
-				peer := (pick + 1 + rand.IntN(n-1)) % n
-				if preferRoute(otherIPs[peer], otherIPs[pick], plat, state.IPLoadStats, r.pool, domain, authorities, window) {
-					pick = peer
-				}
+			tried[route.NodeHash] = struct{}{}
+			if r.nodeTagResolver != nil {
+				route.NodeTag = r.nodeTagResolver(route.NodeHash)
 			}
-			hash := otherIPs[pick]
-			otherIPs[pick] = otherIPs[n-1]
-			otherIPs = otherIPs[:n-1]
-			if route, ok := r.alternateRoute(first.PlatformID, hash); ok && !yield(route) {
+			if !yield(route) {
 				return
 			}
 		}
 	}
 }
 
-func (r *Router) alternateRoute(platformID string, hash node.Hash) (RouteResult, bool) {
-	plat, ok := r.pool.GetPlatform(platformID)
-	if !ok || !plat.View().Contains(hash) {
+func (r *Router) currentLeaseRoute(plat *platform.Platform, state *PlatformRoutingState, account string, tried map[node.Hash]struct{}) (RouteResult, bool) {
+	if account == "" {
+		return RouteResult{}, false
+	}
+	current, ok := state.Leases.GetLease(account)
+	if !ok || current.needsRotation || current.IsExpired(time.Now()) {
+		return RouteResult{}, false
+	}
+	if _, attempted := tried[current.NodeHash]; attempted {
+		return RouteResult{}, false
+	}
+	route, ok := r.alternateRoute(plat, current.NodeHash)
+	if !ok || route.EgressIP != current.EgressIP {
+		return RouteResult{}, false
+	}
+	route.leaseCreatedAtNs = current.CreatedAtNs
+	route.leaseExpiryNs = current.ExpiryNs
+	route.bindingRevision = current.bindingRevision
+	return route, true
+}
+
+const (
+	alternateSampleLimit = 16
+	smallRoutableView    = 32
+)
+
+func (r *Router) pickAlternate(plat *platform.Platform, state *PlatformRoutingState, domain string, tried map[node.Hash]struct{}) (RouteResult, bool) {
+	view := plat.View()
+	if view.Size() == 0 {
+		return RouteResult{}, false
+	}
+	var candidates [2]RouteResult
+	n := 0
+	consider := func(hash node.Hash) {
+		if _, attempted := tried[hash]; attempted || (n > 0 && hash == candidates[0].NodeHash) {
+			return
+		}
+		if route, ok := r.alternateRoute(plat, hash); ok {
+			candidates[n] = route
+			n++
+		}
+	}
+	rng := randomRouteRNGPool.Get().(*rand.Rand)
+	defer randomRouteRNGPool.Put(rng)
+	for i := 0; i < alternateSampleLimit && n < len(candidates); i++ {
+		if hash, ok := view.RandomPick(rng); ok {
+			consider(hash)
+		}
+	}
+	// Ensure a lone eligible node in a small pool is not missed by sampling.
+	if n < len(candidates) && view.Size() <= smallRoutableView {
+		var hashes [smallRoutableView]node.Hash
+		size := 0
+		view.Range(func(hash node.Hash) bool {
+			hashes[size] = hash
+			size++
+			return size < len(hashes)
+		})
+		for _, hash := range hashes[:size] {
+			consider(hash)
+			if n == len(candidates) {
+				break
+			}
+		}
+	}
+	if n == 2 && preferRoute(candidates[1].NodeHash, candidates[0].NodeHash, plat, state.IPLoadStats, r.pool, domain, r.authorities(), r.p2cWindow()) {
+		return candidates[1], true
+	}
+	return candidates[0], n > 0
+}
+
+func (r *Router) alternateRoute(plat *platform.Platform, hash node.Hash) (RouteResult, bool) {
+	if !plat.View().Contains(hash) {
 		return RouteResult{}, false
 	}
 	entry, ok := r.pool.GetEntry(hash)
@@ -113,17 +139,43 @@ func (r *Router) alternateRoute(platformID string, hash node.Hash) (RouteResult,
 	if !ip.IsValid() {
 		return RouteResult{}, false
 	}
-	result := withPlatformContext(plat, RouteResult{NodeHash: hash, EgressIP: ip})
-	if r.nodeTagResolver != nil {
-		result.NodeTag = r.nodeTagResolver(hash)
-	}
-	return result, true
+	return withPlatformContext(plat, RouteResult{NodeHash: hash, EgressIP: ip}), true
 }
 
-// CommitFailover updates a sticky lease after an alternate succeeds, provided
-// the original binding has not expired or been replaced in the meantime.
+func (route RouteResult) matchesLease(current Lease, now time.Time) bool {
+	return !current.IsExpired(now) && current.NodeHash == route.NodeHash &&
+		current.EgressIP == route.EgressIP && current.CreatedAtNs == route.leaseCreatedAtNs &&
+		current.ExpiryNs == route.leaseExpiryNs && current.bindingRevision == route.bindingRevision
+}
+
+// HasLeaseBinding reports whether this route observed an active sticky lease.
+func (route RouteResult) HasLeaseBinding() bool {
+	return route.leaseExpiryNs != 0
+}
+
+// NoteLeaseFailure makes the next request reconsider this binding if it is
+// still active. The failure is local to the account and never opens a circuit.
+func (r *Router) NoteLeaseFailure(account string, route RouteResult) {
+	if account == "" || !route.HasLeaseBinding() {
+		return
+	}
+	state, ok := r.states.Load(route.PlatformID)
+	if !ok {
+		return
+	}
+	state.Leases.leases.Compute(account, func(current Lease, loaded bool) (Lease, xsync.ComputeOp) {
+		if !loaded || !route.matchesLease(current, time.Now()) || current.needsRotation {
+			return current, xsync.CancelOp
+		}
+		current.needsRotation = true
+		return current, xsync.UpdateOp
+	})
+}
+
+// CommitFailover confirms the connected route only while the observed binding
+// is still current, preserving its TTL for same-exit changes.
 func (r *Router) CommitFailover(account string, first, connected RouteResult) {
-	if account == "" || first.PlatformID != connected.PlatformID || first.NodeHash == connected.NodeHash {
+	if account == "" || !first.HasLeaseBinding() || first.PlatformID != connected.PlatformID {
 		return
 	}
 	plat, ok := r.pool.GetPlatform(first.PlatformID)
@@ -136,21 +188,20 @@ func (r *Router) CommitFailover(account string, first, connected RouteResult) {
 	}
 	state.Leases.leases.Compute(account, func(current Lease, loaded bool) (Lease, xsync.ComputeOp) {
 		now := time.Now()
-		if !loaded || current.IsExpired(now) || current.NodeHash != first.NodeHash ||
-			current.EgressIP != first.EgressIP || current.CreatedAtNs != first.leaseCreatedAtNs ||
-			current.ExpiryNs != first.leaseExpiryNs {
+		if !loaded || !first.matchesLease(current, now) {
 			return current, xsync.CancelOp
+		}
+		if first.NodeHash == connected.NodeHash {
+			if !current.needsRotation {
+				return current, xsync.CancelOp
+			}
+			current.needsRotation = false
+			return current, xsync.UpdateOp
 		}
 		entry, ok := r.pool.GetEntry(connected.NodeHash)
 		if !ok || !entry.IsHealthy() || !plat.View().Contains(connected.NodeHash) || entry.GetEgressIP() != connected.EgressIP {
 			return current, xsync.CancelOp
 		}
-		if current.EgressIP == connected.EgressIP {
-			return r.replaceLeaseNode(plat.ID, account, current, connected.NodeHash, now.UnixNano()), xsync.UpdateOp
-		}
-		r.cleanupPreviousLease(state, current, true, leaseInvalidationRemove, plat.ID, account)
-		replacement := newStickyLease(plat, connected.NodeHash, connected.EgressIP, now)
-		r.recordLeaseCreate(state, plat.ID, account, replacement)
-		return replacement, xsync.UpdateOp
+		return r.replaceLeaseRoute(plat, state, account, current, connected, now), xsync.UpdateOp
 	})
 }

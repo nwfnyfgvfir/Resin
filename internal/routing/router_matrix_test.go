@@ -239,6 +239,7 @@ func TestChooseSameIPRotationCandidate_PicksLowestLatency(t *testing.T) {
 		"example.com",
 		[]string{"cloudflare.com"},
 		10*time.Minute,
+		nil,
 	)
 	if !ok {
 		t.Fatal("expected same-ip rotation candidate")
@@ -349,7 +350,7 @@ func TestCommitFailoverPreservesEditedLease(t *testing.T) {
 	pool.addEntry(secondHash, secondEntry)
 	pool.rebuildPlatformView(plat)
 	var alternate RouteResult
-	for route := range router.AlternateRoutes(context.Background(), first, "example.com") {
+	for route := range router.AlternateRoutes(context.Background(), account, first, "example.com") {
 		alternate = route
 		break
 	}
@@ -367,9 +368,43 @@ func TestCommitFailoverPreservesEditedLease(t *testing.T) {
 		t.Fatal(err)
 	}
 	router.CommitFailover(account, first, alternate)
+	router.NoteLeaseFailure(account, first)
 	if got := router.ReadLease(key); got == nil || *got != *edited {
 		t.Fatalf("lease changed after an in-flight failover: got %+v, want %+v", got, edited)
 	}
+	if route, err := router.RouteRequest(plat.Name, account, "example.com"); err != nil || route.NodeHash != firstHash {
+		t.Fatalf("stale failure rotated the edited lease: route=%+v err=%v", route, err)
+	}
+}
+
+func TestAlternateRoutesPrefersConcurrentLeaseOverOriginalExit(t *testing.T) {
+	pool := newRouterTestPool()
+	plat := platform.NewPlatform("plat-concurrent", "Plat-Concurrent", nil, nil)
+	pool.addPlatform(plat)
+	a, entryA := newRoutableEntry(t, `{"id":"lease-a"}`, "203.0.113.1")
+	pool.addEntry(a, entryA)
+	pool.rebuildPlatformView(plat)
+	router := newTestRouter(pool, nil)
+	const account = "acct"
+	first, err := router.RouteRequest(plat.Name, account, "example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	same, sameEntry := newRoutableEntry(t, `{"id":"same-exit"}`, "203.0.113.1")
+	other, otherEntry := newRoutableEntry(t, `{"id":"confirmed-other"}`, "203.0.113.2")
+	pool.addEntry(same, sameEntry)
+	pool.addEntry(other, otherEntry)
+	pool.rebuildPlatformView(plat)
+	router.CommitFailover(account, first, withPlatformContext(plat, RouteResult{
+		NodeHash: other, EgressIP: otherEntry.GetEgressIP(),
+	}))
+	for alternate := range router.AlternateRoutes(context.Background(), account, first, "example.com") {
+		if alternate.NodeHash != other || !alternate.HasLeaseBinding() {
+			t.Fatalf("did not prefer the confirmed lease: route=%+v", alternate)
+		}
+		return
+	}
+	t.Fatal("missing alternate route")
 }
 
 func TestLeaseCleaner_SweepExpiresLeaseDeterministically(t *testing.T) {

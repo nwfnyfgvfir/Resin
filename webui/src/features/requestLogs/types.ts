@@ -13,6 +13,10 @@ export type RequestLogItem = {
   egress_ip: string;
   duration_ms: number;
   first_byte_duration_ms: number;
+  upstream_first_byte_duration_ms?: number;
+  retry_count?: number;
+  first_failure_node_hash?: string;
+  first_failure_error?: string;
   net_ok: boolean;
   http_method: string;
   http_status: number;

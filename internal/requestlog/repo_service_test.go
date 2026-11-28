@@ -55,6 +55,11 @@ func TestRepo_InsertListGetPayloads(t *testing.T) {
 			RespBody:            []byte("resp-b-a"),
 			ReqBodyTruncated:    true,
 			RespBodyTruncated:   true,
+
+			UpstreamFirstByteDurationNs: int64(2 * time.Millisecond),
+			RetryCount:                  1,
+			FirstFailureNodeHash:        "initial-node",
+			FirstFailureError:           "http_connect: dial failed",
 		},
 		{
 			ID:                  "log-b",
@@ -106,6 +111,11 @@ func TestRepo_InsertListGetPayloads(t *testing.T) {
 	if list[0].FirstByteDurationNs != int64(7*time.Millisecond) || list[1].FirstByteDurationNs != int64(15*time.Millisecond) {
 		t.Fatalf("first byte durations: got [%d, %d]", list[0].FirstByteDurationNs, list[1].FirstByteDurationNs)
 	}
+	if log := list[0]; log.RetryCount != 1 || log.FirstFailureNodeHash != "initial-node" ||
+		log.FirstFailureError != "http_connect: dial failed" || log.UpstreamFirstByteDurationNs != int64(2*time.Millisecond) {
+		t.Fatalf("incorrect failover data: %+v", log)
+	}
+
 	if list[0].ID != "log-a" || list[1].ID != "log-b" {
 		t.Fatalf("list order (ts desc, id asc tie-break): got [%s, %s]", list[0].ID, list[1].ID)
 	}
@@ -389,6 +399,17 @@ func TestRepo_OpenMigratesIndexesInHistoricalDBs(t *testing.T) {
 		t.Fatalf("prepare legacy indexes: %v", err)
 	}
 
+	legacyColumnsDDL := `
+		ALTER TABLE request_logs DROP COLUMN retry_count;
+		ALTER TABLE request_logs DROP COLUMN first_failure_node_hash;
+		ALTER TABLE request_logs DROP COLUMN first_failure_error;
+		ALTER TABLE request_logs DROP COLUMN upstream_first_byte_duration_ns;
+		INSERT INTO request_logs (id, ts_ns, proxy_type, first_byte_duration_ns) VALUES ('legacy', 42, 1, 19);
+	`
+	if _, err := repo.activeDB.Exec(legacyColumnsDDL); err != nil {
+		t.Fatalf("prepare legacy row: %v", err)
+	}
+
 	time.Sleep(2 * time.Millisecond)
 	if err := repo.rotateDB(); err != nil {
 		t.Fatalf("repo.rotateDB: %v", err)
@@ -408,6 +429,12 @@ func TestRepo_OpenMigratesIndexesInHistoricalDBs(t *testing.T) {
 		t.Fatalf("open historical DB: %v", err)
 	}
 	t.Cleanup(func() { _ = historicalDB.Close() })
+	legacy, err := reopened.GetByID("legacy")
+	if err != nil || legacy == nil || legacy.FirstByteDurationNs != 19 || legacy.RetryCount != 0 ||
+		legacy.FirstFailureNodeHash != "" || legacy.FirstFailureError != "" || legacy.UpstreamFirstByteDurationNs != 0 {
+		t.Fatalf("migrated historical row=%+v err=%v", legacy, err)
+	}
+
 	assertRequestLogIndexes(t, historicalDB)
 }
 

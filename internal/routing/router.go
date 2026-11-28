@@ -68,6 +68,7 @@ type RouteResult struct {
 
 	leaseCreatedAtNs int64
 	leaseExpiryNs    int64
+	bindingRevision  uint64
 }
 
 const livePickAttempts = 2 // first pick + one retry
@@ -176,6 +177,7 @@ func (r *Router) routeSticky(
 		result = routeResult
 		result.leaseCreatedAtNs = newLease.CreatedAtNs
 		result.leaseExpiryNs = newLease.ExpiryNs
+		result.bindingRevision = newLease.bindingRevision
 		return newLease, op
 	})
 
@@ -201,11 +203,25 @@ func (r *Router) decideStickyLease(
 	}
 
 	if loaded {
-		if newLease, hitResult, ok := r.tryLeaseHit(plat, account, current, nowNs); ok {
-			return newLease, xsync.UpdateOp, hitResult, nil
+		if !current.needsRotation {
+			if newLease, hitResult, ok := r.tryLeaseHit(plat, account, current, nowNs); ok {
+				return newLease, xsync.UpdateOp, hitResult, nil
+			}
 		}
 		if newLease, rotatedResult, ok := r.tryLeaseSameIPRotation(plat, account, current, targetDomain, nowNs); ok {
 			return newLease, xsync.UpdateOp, rotatedResult, nil
+		}
+		if current.needsRotation {
+			excluded := map[node.Hash]struct{}{current.NodeHash: {}}
+			if route, ok := r.pickAlternate(plat, state, targetDomain, excluded); ok {
+				replacement := r.replaceLeaseRoute(plat, state, account, current, route, now)
+				route.LeaseCreated = replacement.EgressIP != current.EgressIP
+				return replacement, xsync.UpdateOp, route, nil
+			}
+			// Keep the existing binding usable when no alternate can be selected.
+			if newLease, hitResult, ok := r.tryLeaseHit(plat, account, current, nowNs); ok {
+				return newLease, xsync.UpdateOp, hitResult, nil
+			}
 		}
 		invalidation = leaseInvalidationRemove
 	}
@@ -251,7 +267,8 @@ func (r *Router) tryLeaseHit(
 	nowNs int64,
 ) (Lease, RouteResult, bool) {
 	entry, ok := r.pool.GetEntry(current.NodeHash)
-	if !ok || !plat.View().Contains(current.NodeHash) || entry.GetEgressIP() != current.EgressIP {
+	if !ok || !entry.IsHealthy() || !current.EgressIP.IsValid() ||
+		!plat.View().Contains(current.NodeHash) || entry.GetEgressIP() != current.EgressIP {
 		return Lease{}, RouteResult{}, false
 	}
 
@@ -285,6 +302,7 @@ func (r *Router) tryLeaseSameIPRotation(
 		targetDomain,
 		r.authorities(),
 		r.p2cWindow(),
+		map[node.Hash]struct{}{current.NodeHash: {}},
 	)
 	if !ok {
 		return Lease{}, RouteResult{}, false
@@ -345,6 +363,8 @@ func (r *Router) recordLeaseCreate(state *PlatformRoutingState, platformID, acco
 func (r *Router) replaceLeaseNode(platformID, account string, lease Lease, hash node.Hash, nowNs int64) Lease {
 	lease.NodeHash = hash
 	lease.LastAccessedNs = nowNs
+	lease.needsRotation = false
+	lease.bindingRevision++
 	r.emitLeaseEvent(LeaseEvent{
 		Type:       LeaseReplace,
 		PlatformID: platformID,
@@ -353,6 +373,16 @@ func (r *Router) replaceLeaseNode(platformID, account string, lease Lease, hash 
 		EgressIP:   lease.EgressIP,
 	})
 	return lease
+}
+
+func (r *Router) replaceLeaseRoute(plat *platform.Platform, state *PlatformRoutingState, account string, current Lease, route RouteResult, now time.Time) Lease {
+	if current.EgressIP == route.EgressIP {
+		return r.replaceLeaseNode(plat.ID, account, current, route.NodeHash, now.UnixNano())
+	}
+	r.cleanupPreviousLease(state, current, true, leaseInvalidationRemove, plat.ID, account)
+	replacement := newStickyLease(plat, route.NodeHash, route.EgressIP, now)
+	r.recordLeaseCreate(state, plat.ID, account, replacement)
+	return replacement
 }
 
 func (r *Router) cleanupPreviousLease(
@@ -432,15 +462,19 @@ func chooseSameIPRotationCandidate(
 	targetDomain string,
 	authorities []string,
 	window time.Duration,
+	excluded map[node.Hash]struct{},
 ) (node.Hash, bool) {
 	bestKnownHash := node.Zero
 	bestKnownLatency := time.Duration(math.MaxInt64)
 	fallbackHash := node.Zero
 
-	plat.View().Range(func(h node.Hash) bool {
+	for _, h := range plat.EgressNodes(targetIP) {
+		if _, skip := excluded[h]; skip {
+			continue
+		}
 		entry, ok := pool.GetEntry(h)
-		if !ok || entry.GetEgressIP() != targetIP {
-			return true
+		if !ok || !entry.IsHealthy() || entry.GetEgressIP() != targetIP || !plat.View().Contains(h) {
+			continue
 		}
 		if fallbackHash == node.Zero {
 			fallbackHash = h
@@ -451,8 +485,7 @@ func chooseSameIPRotationCandidate(
 			bestKnownLatency = latency
 			bestKnownHash = h
 		}
-		return true
-	})
+	}
 
 	if bestKnownHash != node.Zero {
 		return bestKnownHash, true
@@ -536,6 +569,7 @@ func (r *Router) UpsertLease(ml model.Lease) error {
 		if loaded {
 			state.Leases.stats.Dec(current.EgressIP)
 			eventType = LeaseReplace
+			lease.bindingRevision = current.bindingRevision + 1
 		}
 		state.Leases.stats.Inc(lease.EgressIP)
 		return lease, xsync.UpdateOp

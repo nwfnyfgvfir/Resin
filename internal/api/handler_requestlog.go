@@ -312,6 +312,11 @@ type logListItem struct {
 	ReqBodyTruncated     bool   `json:"req_body_truncated"`
 	RespHeadersTruncated bool   `json:"resp_headers_truncated"`
 	RespBodyTruncated    bool   `json:"resp_body_truncated"`
+
+	RetryCount                  int    `json:"retry_count"`
+	FirstFailureNodeHash        string `json:"first_failure_node_hash"`
+	FirstFailureError           string `json:"first_failure_error"`
+	UpstreamFirstByteDurationMs int64  `json:"upstream_first_byte_duration_ms"`
 }
 
 func toLogListItem(s requestlog.LogSummary) logListItem {
@@ -349,6 +354,11 @@ func toLogListItem(s requestlog.LogSummary) logListItem {
 		ReqBodyTruncated:     s.ReqBodyTruncated,
 		RespHeadersTruncated: s.RespHeadersTruncated,
 		RespBodyTruncated:    s.RespBodyTruncated,
+
+		RetryCount:                  s.RetryCount,
+		FirstFailureNodeHash:        s.FirstFailureNodeHash,
+		FirstFailureError:           s.FirstFailureError,
+		UpstreamFirstByteDurationMs: s.UpstreamFirstByteDurationNs / 1e6,
 	}
 }
 

@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { createColumnHelper } from "@tanstack/react-table";
 import { AlertTriangle, Eraser, RefreshCw, Sparkles, X } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { Badge } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
@@ -19,7 +19,7 @@ import { formatApiErrorMessage } from "../../lib/error-message";
 import { formatDateTime } from "../../lib/time";
 import { getSystemConfig } from "../systemConfig/api";
 import { getRequestLog, getRequestLogPayloads, listRequestLogs } from "./api";
-import type { RequestLogItem, RequestLogListFilters } from "./types";
+import type { RequestLogItem, RequestLogListFilters, RequestLogPayloads } from "./types";
 
 type BoolFilter = "all" | "true" | "false";
 type ProxyTypeFilter = "all" | "1" | "2" | "3";
@@ -59,6 +59,11 @@ const REQUEST_LOGS_SOCKS_BADGE_CLASS = "request-logs-proxy-badge-socks";
 
 const PAYLOAD_TABS = ["request", "response"] as const;
 type PayloadTab = (typeof PAYLOAD_TABS)[number];
+type DecodedPayload = {
+  source: RequestLogPayloads;
+  tab: PayloadTab;
+  result: { headers: string; body: string } | { error: unknown };
+};
 const EMPTY_LOGS: RequestLogItem[] = [];
 const BASE64_DECODE_FAILED = "[Base64 解码失败]";
 const UNSUPPORTED_CONTENT_ENCODING_PREFIX = "暂不支持的 Content-Encoding: ";
@@ -369,11 +374,7 @@ export function RequestLogsPage() {
   const [selectedLogId, setSelectedLogId] = useState("");
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [payloadTab, setPayloadTab] = useState<PayloadTab>("request");
-  const [payloadData, setPayloadData] = useState<{ headers: string; body: string }>({
-    headers: "",
-    body: "",
-  });
-  const [payloadDecodePending, setPayloadDecodePending] = useState(false);
+  const [decodedPayload, setDecodedPayload] = useState<DecodedPayload | null>(null);
   const { toasts, dismissToast } = useToast();
 
   const configQuery = useQuery({
@@ -467,6 +468,25 @@ export function RequestLogsPage() {
     enabled: drawerVisible && Boolean(detailLog?.payload_present),
     staleTime: 30_000,
   });
+  const payload = payloadQuery.data;
+  const currentPayloadResult =
+    decodedPayload?.source === payload && decodedPayload?.tab === payloadTab
+      ? decodedPayload.result
+      : undefined;
+  const payloadDecodePending = Boolean(payload && !currentPayloadResult);
+  let payloadHeaders = "";
+  let payloadBody = "";
+  if (currentPayloadResult) {
+    if ("error" in currentPayloadResult) {
+      const { error } = currentPayloadResult;
+      const message = error instanceof Error ? translatePayloadDecodeErrorMessage(error.message, t) : t("未知错误");
+      payloadBody = t("[Body 解码失败：{{message}}]", { message });
+    } else {
+      const { headers, body } = currentPayloadResult;
+      payloadHeaders = headers === BASE64_DECODE_FAILED ? t(headers) : headers;
+      payloadBody = body === BASE64_DECODE_FAILED ? t(body) : body;
+    }
+  }
 
   useEffect(() => {
     if (!drawerVisible) {
@@ -540,19 +560,10 @@ export function RequestLogsPage() {
   };
 
   useEffect(() => {
-    let cancelled = false;
-    const payload = payloadQuery.data;
-
     if (!payload) {
-      setPayloadData({ headers: "", body: "" });
-      setPayloadDecodePending(false);
-      return () => {
-        cancelled = true;
-      };
+      return;
     }
-
-    setPayloadData({ headers: "", body: "" });
-    setPayloadDecodePending(true);
+    let cancelled = false;
 
     const decodePayload = async () => {
       const [headersBase64, bodyBase64] =
@@ -560,34 +571,31 @@ export function RequestLogsPage() {
           ? [payload.req_headers_b64, payload.req_body_b64]
           : [payload.resp_headers_b64, payload.resp_body_b64];
 
-      const rawHeaders = decodeBase64ToText(headersBase64).trimEnd();
-      const rawBody = (await decodePayloadBodyForDisplay(bodyBase64, rawHeaders)).trimEnd();
-      const headers = rawHeaders === BASE64_DECODE_FAILED ? t(rawHeaders) : rawHeaders;
-      const body = rawBody === BASE64_DECODE_FAILED ? t(rawBody) : rawBody;
-
-      if (cancelled) {
-        return;
-      }
-      setPayloadData({ headers, body });
-      setPayloadDecodePending(false);
+      const headers = decodeBase64ToText(headersBase64).trimEnd();
+      const body = (await decodePayloadBodyForDisplay(bodyBase64, headers)).trimEnd();
+      return { headers, body };
     };
 
-    void decodePayload().catch((error: unknown) => {
-      if (cancelled) {
-        return;
-      }
-      const message = error instanceof Error ? translatePayloadDecodeErrorMessage(error.message, t) : t("未知错误");
-      setPayloadData({ headers: "", body: t("[Body 解码失败：{{message}}]", { message }) });
-      setPayloadDecodePending(false);
-    });
+    void decodePayload().then(
+      (result) => {
+        if (!cancelled) {
+          setDecodedPayload({ source: payload, tab: payloadTab, result });
+        }
+      },
+      (error: unknown) => {
+        if (!cancelled) {
+          setDecodedPayload({ source: payload, tab: payloadTab, result: { error } });
+        }
+      },
+    );
 
     return () => {
       cancelled = true;
     };
-  }, [payloadQuery.data, payloadTab, t]);
+  }, [payload, payloadTab]);
 
   const hasMore = Boolean(logsQuery.data?.has_more && logsQuery.data?.next_cursor);
-  const renderProxyTypeBadge = (proxyType: number, context: "table" | "drawer" = "table") => {
+  const renderProxyTypeBadge = useCallback((proxyType: number, context: "table" | "drawer" = "table") => {
     const className = proxyTypeBadgeClassName(proxyType);
     if (!className) {
       return t(proxyTypeLabel(proxyType));
@@ -603,7 +611,7 @@ export function RequestLogsPage() {
     }
 
     return <Badge className={className}>{label}</Badge>;
-  };
+  }, [t]);
 
   const col = useMemo(() => createColumnHelper<RequestLogItem>(), []);
 
@@ -718,7 +726,7 @@ export function RequestLogsPage() {
         },
       }),
     ],
-    [col, t]
+    [col, renderProxyTypeBadge, t]
   );
 
   return (
@@ -1002,6 +1010,26 @@ export function RequestLogsPage() {
                     <span>{t("总耗时")}</span>
                     <p>{formatDurationMs(detailLog.duration_ms)}</p>
                   </div>
+                  {(detailLog.retry_count ?? 0) > 0 ? (
+                    <>
+                      <div>
+                        <span>{t("切换次数")}</span>
+                        <p>{detailLog.retry_count}</p>
+                      </div>
+                      <div>
+                        <span>{t("最终节点首字耗时")}</span>
+                        <p>{formatOptionalDurationMs(detailLog.upstream_first_byte_duration_ms)}</p>
+                      </div>
+                      <div>
+                        <span>{t("首次失败节点")}</span>
+                        <p style={{ wordBreak: "break-all" }}>{detailLog.first_failure_node_hash || "-"}</p>
+                      </div>
+                      <div>
+                        <span>{t("首次失败原因")}</span>
+                        <p style={{ wordBreak: "break-word" }}>{detailLog.first_failure_error || "-"}</p>
+                      </div>
+                    </>
+                  ) : null}
                   <div>
                     <span>{t("平台")}</span>
                     <p>{detailLog.platform_name || "-"}</p>
@@ -1155,7 +1183,7 @@ export function RequestLogsPage() {
                       </div>
                     ) : null}
 
-                    {(payloadQuery.isFetching || payloadDecodePending) && !(payloadData.headers || payloadData.body) ? (
+                    {(payloadQuery.isFetching || payloadDecodePending) && !(payloadHeaders || payloadBody) ? (
                       <div className="callout" style={{ marginTop: "12px", color: "var(--text-secondary)" }}>
                         <RefreshCw size={14} className="spin" />
                         <span>{t("加载报文内容中...")}</span>
@@ -1163,10 +1191,10 @@ export function RequestLogsPage() {
                     ) : (
                       <>
                         <pre className="logs-payload-box" style={{ minHeight: "auto", border: "1px solid var(--border)", marginBottom: "8px" }}>
-                          {payloadData.headers || t("（空 Headers）")}
+                          {payloadHeaders || t("（空 Headers）")}
                         </pre>
                         <pre className="logs-payload-box">
-                          {payloadData.body || t("（空 Body）")}
+                          {payloadBody || t("（空 Body）")}
                         </pre>
                       </>
                     )}

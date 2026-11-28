@@ -18,7 +18,7 @@ import (
 	"github.com/Resinat/Resin/internal/state"
 )
 
-const logSummarySelectColumns = "id, ts_ns, proxy_type, client_ip, platform_id, platform_name, account, target_host, target_url, node_hash, node_tag, egress_ip, duration_ns, first_byte_duration_ns, net_ok, http_method, http_status, resin_error, upstream_stage, upstream_err_kind, upstream_errno, upstream_err_msg, ingress_bytes, egress_bytes, payload_present, req_headers_len, req_body_len, resp_headers_len, resp_body_len, req_headers_truncated, req_body_truncated, resp_headers_truncated, resp_body_truncated"
+const logSummarySelectColumns = "id, ts_ns, proxy_type, client_ip, platform_id, platform_name, account, target_host, target_url, node_hash, node_tag, egress_ip, duration_ns, first_byte_duration_ns, net_ok, http_method, http_status, resin_error, upstream_stage, upstream_err_kind, upstream_errno, upstream_err_msg, ingress_bytes, egress_bytes, payload_present, req_headers_len, req_body_len, resp_headers_len, resp_body_len, req_headers_truncated, req_body_truncated, resp_headers_truncated, resp_body_truncated, retry_count, first_failure_node_hash, first_failure_error, upstream_first_byte_duration_ns"
 
 // Repo manages rolling SQLite databases for request logs.
 // Each DB is named request_logs-<unix_ms>.db and lives in logDir.
@@ -122,8 +122,9 @@ func (r *Repo) InsertBatch(entries []proxy.RequestLogEntry) (int, error) {
 		ingress_bytes, egress_bytes,
 		payload_present,
 		req_headers_len, req_body_len, resp_headers_len, resp_body_len,
-		req_headers_truncated, req_body_truncated, resp_headers_truncated, resp_body_truncated
-	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		req_headers_truncated, req_body_truncated, resp_headers_truncated, resp_body_truncated,
+		retry_count, first_failure_node_hash, first_failure_error, upstream_first_byte_duration_ns
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return 0, fmt.Errorf("requestlog repo prepare log: %w", err)
 	}
@@ -164,6 +165,7 @@ func (r *Repo) InsertBatch(entries []proxy.RequestLogEntry) (int, error) {
 			e.ReqHeadersLen, e.ReqBodyLen, e.RespHeadersLen, e.RespBodyLen,
 			boolToInt(e.ReqHeadersTruncated), boolToInt(e.ReqBodyTruncated),
 			boolToInt(e.RespHeadersTruncated), boolToInt(e.RespBodyTruncated),
+			e.RetryCount, e.FirstFailureNodeHash, e.FirstFailureError, e.UpstreamFirstByteDurationNs,
 		)
 		if err != nil {
 			log.Printf("[requestlog] warning: skip log row id=%q insert failed: %v", id, err)
@@ -227,6 +229,11 @@ type LogSummary struct {
 	UpstreamErrMsg      string `json:"upstream_err_msg"`
 	IngressBytes        int64  `json:"ingress_bytes"`
 	EgressBytes         int64  `json:"egress_bytes"`
+
+	RetryCount                  int    `json:"retry_count"`
+	FirstFailureNodeHash        string `json:"first_failure_node_hash"`
+	FirstFailureError           string `json:"first_failure_error"`
+	UpstreamFirstByteDurationNs int64  `json:"upstream_first_byte_duration_ns"`
 
 	PayloadPresent       bool `json:"payload_present"`
 	ReqHeadersLen        int  `json:"req_headers_len"`
@@ -679,6 +686,7 @@ func scanLogSummary(s rowScanner) (LogSummary, error) {
 		&payloadPresent,
 		&row.ReqHeadersLen, &row.ReqBodyLen, &row.RespHeadersLen, &row.RespBodyLen,
 		&rht, &rbt, &rsht, &rsbt,
+		&row.RetryCount, &row.FirstFailureNodeHash, &row.FirstFailureError, &row.UpstreamFirstByteDurationNs,
 	)
 	if err != nil {
 		return LogSummary{}, err

@@ -275,20 +275,26 @@ func seedObservabilityData(
 	logID := "log-contract-1"
 	inserted, err := requestlogRepo.InsertBatch([]proxy.RequestLogEntry{
 		{
-			ID:                   logID,
-			StartedAtNs:          time.Now().Add(-2 * time.Minute).UnixNano(),
-			ProxyType:            proxy.ProxyTypeReverse,
-			ClientIP:             "127.0.0.1",
-			PlatformID:           platformID,
-			PlatformName:         "Platform One",
-			Account:              "acct-1",
-			TargetHost:           "example.com",
-			TargetURL:            "https://example.com/api",
-			NodeHash:             "node-1",
-			NodeTag:              "sub/tag-1",
-			EgressIP:             "8.8.8.8",
-			DurationNs:           int64(45 * time.Millisecond),
-			FirstByteDurationNs:  int64(12 * time.Millisecond),
+			ID:                  logID,
+			StartedAtNs:         time.Now().Add(-2 * time.Minute).UnixNano(),
+			ProxyType:           proxy.ProxyTypeReverse,
+			ClientIP:            "127.0.0.1",
+			PlatformID:          platformID,
+			PlatformName:        "Platform One",
+			Account:             "acct-1",
+			TargetHost:          "example.com",
+			TargetURL:           "https://example.com/api",
+			NodeHash:            "node-1",
+			NodeTag:             "sub/tag-1",
+			EgressIP:            "8.8.8.8",
+			DurationNs:          int64(45 * time.Millisecond),
+			FirstByteDurationNs: int64(12 * time.Millisecond),
+
+			RetryCount:                  2,
+			FirstFailureNodeHash:        "initial-node",
+			FirstFailureError:           "http_connect: EOF",
+			UpstreamFirstByteDurationNs: int64(3 * time.Millisecond),
+
 			NetOK:                true,
 			HTTPMethod:           "GET",
 			HTTPStatus:           200,
@@ -1735,6 +1741,10 @@ func TestAPIContract_RequestLogEndpoints(t *testing.T) {
 	}
 	if row["first_byte_duration_ms"] != float64(12) {
 		t.Fatalf("detail first_byte_duration_ms: got %v, want 12", row["first_byte_duration_ms"])
+	}
+	if row["retry_count"] != float64(2) || row["first_failure_node_hash"] != "initial-node" ||
+		row["first_failure_error"] != "http_connect: EOF" || row["upstream_first_byte_duration_ms"] != float64(3) {
+		t.Fatalf("detail failover fields: %+v", row)
 	}
 	if row["payload_present"] != true {
 		t.Fatalf("payload_present: got %v, want true", row["payload_present"])

@@ -298,12 +298,22 @@ func TestPlatform_NotifyDirty_AddRemove(t *testing.T) {
 	if p.View().Size() != 1 {
 		t.Fatal("NotifyDirty should add passing node")
 	}
+	firstIP := entry.GetEgressIP()
+	otherIP := netip.MustParseAddr("203.0.113.1")
+	entry.SetEgressIP(otherIP)
+	p.NotifyDirty(h, getEntry, alwaysLookup, usGeoLookup)
+	if nodes := p.EgressNodes(otherIP); len(nodes) != 1 || nodes[0] != h || len(p.EgressNodes(firstIP)) != 0 {
+		t.Fatalf("node was not moved to the new egress index: %v", nodes)
+	}
 
 	// Circuit-break → NotifyDirty removes.
 	entry.CircuitOpenSince.Store(time.Now().UnixNano())
 	p.NotifyDirty(h, getEntry, alwaysLookup, usGeoLookup)
 	if p.View().Size() != 0 {
 		t.Fatal("NotifyDirty should remove circuit-broken node")
+	}
+	if len(p.EgressNodes(otherIP)) != 0 {
+		t.Fatal("circuit-broken node remains indexed")
 	}
 
 	// Recover → NotifyDirty re-adds.
@@ -348,5 +358,8 @@ func TestPlatform_FullRebuild_ClearsOld(t *testing.T) {
 	}
 	if p.View().Contains(h2) {
 		t.Fatal("h2 should have been removed by rebuild")
+	}
+	if nodes := p.EgressNodes(e1.GetEgressIP()); len(nodes) != 1 || nodes[0] != h1 {
+		t.Fatalf("unexpected egress index after rebuild: %v", nodes)
 	}
 }

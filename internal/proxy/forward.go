@@ -75,7 +75,7 @@ func (p *ForwardProxy) outboundHTTPTransport(routed routedOutbound) *http.Transp
 			p.transportPool = NewOutboundTransportPool(p.transportConfig)
 		}
 	})
-	return p.transportPool.Get(routed.Route.NodeHash, routed.Outbound, p.metricsSink)
+	return p.transportPool.Get(routed.Route.NodeHash, routed.Outbound, p.metricsSink, routed.stalledDials)
 }
 
 func (p *ForwardProxy) directHTTPTransport() *http.Transport {
@@ -244,9 +244,9 @@ func (p *ForwardProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			transport: p.outboundHTTPTransport,
 			health:    p.health,
 			domain:    netutil.ExtractDomain(r.Host),
+			lifecycle: lifecycle,
 			onRoute: func(result routing.RouteResult) {
 				route, hasRoute = result, true
-				lifecycle.setRouteResult(result)
 			},
 		}
 	}
@@ -336,10 +336,8 @@ func (p *ForwardProxy) handleCONNECT(w http.ResponseWriter, r *http.Request) {
 		platName,
 		account,
 		target,
+		lifecycle,
 	)
-	if prepare.route.PlatformID != "" {
-		lifecycle.setRouteResult(prepare.route)
-	}
 	if prepare.session == nil {
 		if prepare.proxyErr != nil {
 			lifecycle.setProxyError(prepare.proxyErr)
@@ -361,7 +359,6 @@ func (p *ForwardProxy) handleCONNECT(w http.ResponseWriter, r *http.Request) {
 		lifecycle.setProxyError(ErrUpstreamRequestFailed)
 		lifecycle.setUpstreamError("connect_hijack", errors.New("response writer does not support hijacking"))
 		lifecycle.setHTTPStatus(ErrUpstreamRequestFailed.HTTPCode)
-		prepare.session.recordResult(false)
 		writeProxyError(w, ErrUpstreamRequestFailed)
 		return
 	}
@@ -371,7 +368,6 @@ func (p *ForwardProxy) handleCONNECT(w http.ResponseWriter, r *http.Request) {
 		prepare.session.upstreamConn.Close()
 		lifecycle.setProxyError(ErrUpstreamRequestFailed)
 		lifecycle.setUpstreamError("connect_hijack", err)
-		prepare.session.recordResult(false)
 		return
 	}
 
@@ -404,7 +400,7 @@ func (p *ForwardProxy) handleCONNECT(w http.ResponseWriter, r *http.Request) {
 		lifecycle.setUpstreamError(relay.upstreamStage, relay.upstreamErr)
 	}
 	lifecycle.setNetOK(relay.netOK)
-	prepare.session.recordResult(relay.netOK)
+	prepare.session.finish(relay)
 }
 
 // shouldRecordForwardCopyFailure decides whether an HTTP response body copy

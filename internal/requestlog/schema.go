@@ -41,7 +41,11 @@ CREATE TABLE IF NOT EXISTS request_logs (
 	req_headers_truncated  INTEGER NOT NULL DEFAULT 0,
 	req_body_truncated     INTEGER NOT NULL DEFAULT 0,
 	resp_headers_truncated INTEGER NOT NULL DEFAULT 0,
-	resp_body_truncated    INTEGER NOT NULL DEFAULT 0
+	resp_body_truncated    INTEGER NOT NULL DEFAULT 0,
+	retry_count           INTEGER NOT NULL DEFAULT 0,
+	first_failure_node_hash TEXT NOT NULL DEFAULT '',
+	first_failure_error   TEXT NOT NULL DEFAULT '',
+	upstream_first_byte_duration_ns INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS request_log_payloads (
@@ -76,8 +80,16 @@ DROP INDEX IF EXISTS idx_request_logs_platform_id;
 const CreateDDL = requestLogTablesDDL + requestLogIndexesDDL
 
 func ensureRequestLogSchema(db *sql.DB) error {
-	if err := ensureRequestLogColumn(db, "request_logs", "first_byte_duration_ns", "first_byte_duration_ns INTEGER NOT NULL DEFAULT 0"); err != nil {
-		return err
+	for _, column := range []struct{ name, definition string }{
+		{"first_byte_duration_ns", "INTEGER NOT NULL DEFAULT 0"},
+		{"retry_count", "INTEGER NOT NULL DEFAULT 0"},
+		{"first_failure_node_hash", "TEXT NOT NULL DEFAULT ''"},
+		{"first_failure_error", "TEXT NOT NULL DEFAULT ''"},
+		{"upstream_first_byte_duration_ns", "INTEGER NOT NULL DEFAULT 0"},
+	} {
+		if err := ensureRequestLogColumn(db, "request_logs", column.name, column.name+" "+column.definition); err != nil {
+			return err
+		}
 	}
 
 	tx, err := db.Begin()

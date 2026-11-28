@@ -5,8 +5,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/Resinat/Resin/internal/node"
+	"github.com/puzpuzpuz/xsync/v4"
 )
 
 // Lease represents a sticky routing lease.
@@ -17,6 +17,9 @@ type Lease struct {
 	CreatedAtNs    int64
 	ExpiryNs       int64
 	LastAccessedNs int64
+
+	bindingRevision uint64
+	needsRotation   bool
 }
 
 // LeaseTable manages per-account sticky leases for a single platform.

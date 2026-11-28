@@ -59,6 +59,8 @@ type NodeEntry struct {
 
 	// Outbound instance for this node.
 	Outbound atomic.Pointer[adapter.Outbound]
+	// ProxyDialsStalled counts expired dial operations still running in the outbound.
+	ProxyDialsStalled atomic.Int32
 }
 
 // NewNodeEntry creates a NodeEntry with the given static fields.

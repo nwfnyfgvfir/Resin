@@ -3,6 +3,7 @@ package platform
 import (
 	"net/netip"
 	"regexp"
+	"slices"
 	"sync"
 
 	"github.com/Resinat/Resin/internal/node"
@@ -43,8 +44,15 @@ type Platform struct {
 
 	// Routable view & its lock.
 	// viewMu serializes both FullRebuild and NotifyDirty.
-	view   *RoutableView
-	viewMu sync.Mutex
+	view            *RoutableView
+	viewMu          sync.RWMutex
+	nodesByEgressIP map[netip.Addr][]node.Hash
+	egressPositions map[node.Hash]egressPosition
+}
+
+type egressPosition struct {
+	ip    netip.Addr
+	index int
 }
 
 // NewPlatform creates a Platform with an empty routable view.
@@ -56,11 +64,13 @@ func NewPlatform(id, name string, regexFilters []*regexp.Regexp, regionFilters [
 // NewPlatformWithTagFilter creates a Platform with compiled line-oriented tag rules.
 func NewPlatformWithTagFilter(id, name string, regexFilters node.TagFilter, regionFilters []string) *Platform {
 	return &Platform{
-		ID:            id,
-		Name:          name,
-		RegexFilters:  regexFilters,
-		RegionFilters: regionFilters,
-		view:          NewRoutableView(),
+		ID:              id,
+		Name:            name,
+		RegexFilters:    regexFilters,
+		RegionFilters:   regionFilters,
+		view:            NewRoutableView(),
+		nodesByEgressIP: make(map[netip.Addr][]node.Hash),
+		egressPositions: make(map[node.Hash]egressPosition),
 	}
 }
 
@@ -68,6 +78,16 @@ func NewPlatformWithTagFilter(id, name string, regexFilters node.TagFilter, regi
 // External callers cannot Add/Remove/Clear — only FullRebuild and NotifyDirty can mutate.
 func (p *Platform) View() ReadOnlyView {
 	return p.view
+}
+
+// EgressNodes returns a snapshot of the routable nodes indexed for ip.
+func (p *Platform) EgressNodes(ip netip.Addr) []node.Hash {
+	if !ip.IsValid() {
+		return nil
+	}
+	p.viewMu.RLock()
+	defer p.viewMu.RUnlock()
+	return slices.Clone(p.nodesByEgressIP[ip])
 }
 
 // FullRebuild clears the routable view and re-evaluates all nodes from the pool.
@@ -81,10 +101,10 @@ func (p *Platform) FullRebuild(
 	defer p.viewMu.Unlock()
 
 	p.view.Clear()
+	clear(p.nodesByEgressIP)
+	clear(p.egressPositions)
 	poolRange(func(h node.Hash, entry *node.NodeEntry) bool {
-		if p.evaluateNode(entry, subLookup, geoLookup) {
-			p.view.Add(h)
-		}
+		p.setRoutableIP(h, p.evaluateNode(entry, subLookup, geoLookup))
 		return true
 	})
 }
@@ -101,60 +121,84 @@ func (p *Platform) NotifyDirty(
 	defer p.viewMu.Unlock()
 
 	entry, ok := getEntry(h)
-	if !ok {
-		// Node was deleted from pool.
+	var ip netip.Addr
+	if ok {
+		ip = p.evaluateNode(entry, subLookup, geoLookup)
+	}
+	p.setRoutableIP(h, ip)
+}
+
+// setRoutableIP updates both indexes under viewMu.
+func (p *Platform) setRoutableIP(h node.Hash, ip netip.Addr) {
+	if pos, ok := p.egressPositions[h]; ok {
+		if pos.ip == ip {
+			return
+		}
+		bucket := p.nodesByEgressIP[pos.ip]
+		last := len(bucket) - 1
+		if pos.index != last {
+			moved := bucket[last]
+			bucket[pos.index] = moved
+			p.egressPositions[moved] = pos
+		}
+		if last == 0 {
+			delete(p.nodesByEgressIP, pos.ip)
+		} else {
+			p.nodesByEgressIP[pos.ip] = bucket[:last]
+		}
+		delete(p.egressPositions, h)
+	}
+	if !ip.IsValid() {
 		p.view.Remove(h)
 		return
 	}
-
-	if p.evaluateNode(entry, subLookup, geoLookup) {
-		p.view.Add(h)
-	} else {
-		p.view.Remove(h)
-	}
+	bucket := p.nodesByEgressIP[ip]
+	p.egressPositions[h] = egressPosition{ip: ip, index: len(bucket)}
+	p.nodesByEgressIP[ip] = append(bucket, h)
+	p.view.Add(h)
 }
 
-// evaluateNode checks all filter conditions for platform routability.
+// evaluateNode returns the indexed egress IP if the node is routable.
 func (p *Platform) evaluateNode(
 	entry *node.NodeEntry,
 	subLookup node.SubLookupFunc,
 	geoLookup GeoLookupFunc,
-) bool {
+) netip.Addr {
 	// 0. Disabled nodes are never routable.
 	if entry.IsDisabledBySubscriptions(subLookup) {
-		return false
+		return netip.Addr{}
 	}
 
 	// 1. Healthy for routing (outbound ready + circuit not open).
 	if !entry.IsHealthy() {
-		return false
+		return netip.Addr{}
 	}
 
 	// 2. Tag regex match.
 	if !entry.MatchTagFilter(p.RegexFilters, subLookup) {
-		return false
+		return netip.Addr{}
 	}
 
 	// 3. Egress IP must be known.
 	egressIP := entry.GetEgressIP()
 	if !egressIP.IsValid() {
-		return false
+		return netip.Addr{}
 	}
 
 	// 4. Region filter (when configured).
 	if len(p.RegionFilters) > 0 {
 		region := entry.GetRegion(geoLookup)
 		if !MatchRegionFilter(region, p.RegionFilters) {
-			return false
+			return netip.Addr{}
 		}
 	}
 
 	// 5. Has at least one latency record.
 	if !entry.HasLatency() {
-		return false
+		return netip.Addr{}
 	}
 
-	return true
+	return egressIP
 }
 
 // MatchRegionFilter applies include/exclude region filters.

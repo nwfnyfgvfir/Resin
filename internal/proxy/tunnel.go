@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Resinat/Resin/internal/netutil"
@@ -26,11 +27,17 @@ type tunnelDeps struct {
 
 type preparedTunnel struct {
 	upstreamConn net.Conn
-	recordResult func(bool)
+	onFirstByte  func()
+	recordResult func(tunnelRelayResult)
+}
+
+func (t *preparedTunnel) finish(result tunnelRelayResult) {
+	if t.recordResult != nil {
+		t.recordResult(result)
+	}
 }
 
 type tunnelPrepareResult struct {
-	route         routing.RouteResult
 	session       *preparedTunnel
 	proxyErr      *ProxyError
 	upstreamStage string
@@ -39,12 +46,14 @@ type tunnelPrepareResult struct {
 }
 
 type tunnelRelayResult struct {
-	ingressBytes  int64
-	egressBytes   int64
-	netOK         bool
-	proxyErr      *ProxyError
-	upstreamStage string
-	upstreamErr   error
+	ingressBytes         int64
+	egressBytes          int64
+	netOK                bool
+	proxyErr             *ProxyError
+	upstreamStage        string
+	upstreamErr          error
+	upstreamResponded    bool
+	earlyUpstreamFailure bool
 }
 
 type tunnelPumpOptions struct {
@@ -56,12 +65,29 @@ type firstByteReader struct {
 	reader      io.Reader
 	onFirstByte func()
 	once        sync.Once
+	onEnd       func(error)
 }
 
 func (r *firstByteReader) Read(p []byte) (int, error) {
 	n, err := r.reader.Read(p)
 	if n > 0 && r.onFirstByte != nil {
 		r.once.Do(r.onFirstByte)
+	}
+	if err != nil && r.onEnd != nil {
+		r.onEnd(err)
+	}
+	return n, err
+}
+
+type tunnelWriteObserver struct {
+	io.Writer
+	onError func()
+}
+
+func (w tunnelWriteObserver) Write(p []byte) (int, error) {
+	n, err := w.Writer.Write(p)
+	if err != nil {
+		w.onError()
 	}
 	return n, err
 }
@@ -72,6 +98,7 @@ func prepareConnectTunnel(
 	platformName string,
 	account string,
 	target string,
+	lifecycle *requestLifecycle,
 ) tunnelPrepareResult {
 	if deps.bypass != nil && deps.bypass.ShouldBypass(target) {
 		return prepareDirectConnectTunnel(ctx, deps, target)
@@ -84,37 +111,38 @@ func prepareConnectTunnel(
 
 	domain := netutil.ExtractDomain(target)
 	destination := M.ParseSocksaddr(target)
-	var lastRoute routing.RouteResult
 	var dialErr error
+	feedback := &attemptFeedback{attempts: attempts, health: deps.health, lifecycle: lifecycle}
 	for routed := range attempts.routes(ctx) {
-		lastRoute = routed.Route
-		if deps.health != nil {
-			go deps.health.RecordLatency(lastRoute.NodeHash, domain, nil)
+		route := routed.Route
+		start := time.Now()
+		if lifecycle != nil {
+			lifecycle.startRouteAttempt(route)
 		}
-		rawConn, err := routed.Outbound.DialContext(ctx, "tcp", destination)
+		rawConn, err := dialOutbound(ctx, outboundDialTimeout, routed.Outbound, routed.stalledDials, "tcp", destination)
 		if err == nil {
 			if ctx.Err() != nil {
 				_ = rawConn.Close()
 				break
 			}
-			attempts.router.CommitFailover(attempts.account, attempts.first, lastRoute)
-			return prepareRoutedTunnel(deps, lastRoute, rawConn, domain)
+			return prepareRoutedTunnel(ctx, deps, feedback, route, rawConn, domain, start)
 		}
 		dialErr = err
-		if errors.Is(ctx.Err(), context.Canceled) || errors.Is(err, context.Canceled) {
+		if ctx.Err() != nil || errors.Is(err, context.Canceled) {
 			break
 		}
-		recordPassiveResultAsync(deps.health, lastRoute, false)
+		feedback.failed(route, "connect_dial", err, true)
 	}
 	if ctx.Err() != nil {
 		dialErr = ctx.Err()
+	} else if !errors.Is(dialErr, context.Canceled) {
+		feedback.finish(false)
 	}
 	if dialErr == nil {
 		return tunnelPrepareResult{proxyErr: ErrNoAvailableNodes}
 	}
 	proxyErr := classifyConnectError(dialErr)
 	return tunnelPrepareResult{
-		route:         lastRoute,
 		proxyErr:      proxyErr,
 		upstreamStage: "connect_dial",
 		upstreamErr:   dialErr,
@@ -122,11 +150,7 @@ func prepareConnectTunnel(
 	}
 }
 
-func prepareRoutedTunnel(deps tunnelDeps, route routing.RouteResult, rawConn net.Conn, domain string) tunnelPrepareResult {
-	recordResult := func(ok bool) {
-		recordPassiveResultAsync(deps.health, route, ok)
-	}
-
+func prepareRoutedTunnel(ctx context.Context, deps tunnelDeps, feedback *attemptFeedback, route routing.RouteResult, rawConn net.Conn, domain string, start time.Time) tunnelPrepareResult {
 	var upstreamBase net.Conn = rawConn
 	if deps.metricsSink != nil {
 		deps.metricsSink.OnConnectionLifecycle(ConnectionOutbound, ConnectionOpen)
@@ -140,10 +164,28 @@ func prepareRoutedTunnel(deps tunnelDeps, route routing.RouteResult, rawConn net
 	})
 
 	return tunnelPrepareResult{
-		route: route,
 		session: &preparedTunnel{
 			upstreamConn: upstreamConn,
-			recordResult: recordResult,
+			onFirstByte: func() {
+				if feedback.lifecycle != nil {
+					feedback.lifecycle.markUpstreamFirstByte(start)
+				}
+				if ctx.Err() == nil {
+					feedback.confirm(route)
+				}
+			},
+			recordResult: func(result tunnelRelayResult) {
+				if ctx.Err() != nil {
+					return
+				}
+				if !result.netOK || result.earlyUpstreamFailure {
+					feedback.failed(route, result.upstreamStage, result.upstreamErr, result.earlyUpstreamFailure)
+				}
+				feedback.finish(result.upstreamResponded)
+				if result.netOK && result.upstreamResponded {
+					recordPassiveResultAsync(deps.health, route, true)
+				}
+			},
 		},
 	}
 }
@@ -171,7 +213,6 @@ func prepareDirectConnectTunnel(ctx context.Context, deps tunnelDeps, target str
 	return tunnelPrepareResult{
 		session: &preparedTunnel{
 			upstreamConn: upstreamConn,
-			recordResult: func(bool) {},
 		},
 	}
 }
@@ -222,18 +263,32 @@ func pumpPreparedTunnelReader(
 	}
 	ingressBytesCh := make(chan copyResult, 1)
 	egressBytesCh := make(chan copyResult, 1)
+	var clientReadEnded atomic.Bool
+	var upstreamEndedEarly, upstreamWriteFailed, upstreamResponded bool
 	go func() {
-		n, copyErr := io.Copy(session.upstreamConn, clientToUpstream)
+		clientReader := &firstByteReader{reader: clientToUpstream, onEnd: func(error) { clientReadEnded.Store(true) }}
+		upstreamWriter := tunnelWriteObserver{Writer: session.upstreamConn, onError: func() { upstreamWriteFailed = true }}
+		n, copyErr := io.Copy(upstreamWriter, clientReader)
 		if !isBenignTunnelCopyError(copyErr) || !closeWriteConn(session.upstreamConn) {
 			closeBoth()
 		}
 		egressBytesCh <- copyResult{n: n, err: copyErr}
 	}()
 	go func() {
-		var upstreamReader io.Reader = session.upstreamConn
-		if opts.onFirstIngressByte != nil {
-			// 隧道首字耗时以目标站点返回的第一批字节为准，而不是 CONNECT/SOCKS 握手完成。
-			upstreamReader = &firstByteReader{reader: session.upstreamConn, onFirstByte: opts.onFirstIngressByte}
+		upstreamReader := &firstByteReader{
+			reader: session.upstreamConn,
+			onFirstByte: func() {
+				upstreamResponded = true
+				if opts.onFirstIngressByte != nil {
+					opts.onFirstIngressByte()
+				}
+				if session.onFirstByte != nil {
+					session.onFirstByte()
+				}
+			},
+			onEnd: func(err error) {
+				upstreamEndedEarly = !clientReadEnded.Load() && !errors.Is(err, context.Canceled)
+			},
 		}
 		n, copyErr := io.Copy(clientConn, upstreamReader)
 		if !isBenignTunnelCopyError(copyErr) || !closeWriteConn(clientConn) {
@@ -256,9 +311,12 @@ func pumpPreparedTunnelReader(
 	}
 
 	result := tunnelRelayResult{
-		ingressBytes: ingressResult.n,
-		egressBytes:  egressResult.n,
-		netOK:        true,
+		ingressBytes:      ingressResult.n,
+		egressBytes:       egressResult.n,
+		netOK:             true,
+		upstreamResponded: upstreamResponded,
+		earlyUpstreamFailure: !upstreamResponded && (upstreamWriteFailed ||
+			(egressResult.n > 0 && (upstreamEndedEarly || opts.requireBidirectionalTraffic))),
 	}
 	switch {
 	case !ingressErrBenign:
@@ -271,7 +329,7 @@ func pumpPreparedTunnelReader(
 		result.proxyErr = ErrUpstreamRequestFailed
 		result.upstreamStage = "connect_client_to_upstream_copy"
 		result.upstreamErr = egressResult.err
-	case opts.requireBidirectionalTraffic && (ingressResult.n == 0 || egressResult.n == 0):
+	case result.earlyUpstreamFailure || (opts.requireBidirectionalTraffic && (ingressResult.n == 0 || egressResult.n == 0)):
 		result.netOK = false
 		result.proxyErr = ErrUpstreamRequestFailed
 		switch {
